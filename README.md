@@ -143,13 +143,28 @@ niceclaude stop      # stops it
 `deploy/` has a systemd user unit, a container entrypoint, and a Windows
 Scheduled Task script.
 
+**Pacing still works without it.** If the snapshot goes stale the hook refreshes
+on demand, costing a couple of seconds on that one tool call. What you lose is
+the *record*: that refresh only fires on paced folders, at most every 180s, and
+only while work is actually running — so idle time never gets sampled at all.
+
+That biases exactly the analyses that matter. `burn` would never see the idle
+stretches and would overstate your consumption rate; `plot` would show a record
+that looks like continuous activity. (On a real weekend log, 87% of samples had
+no live session window — with no daemon, that entire story is invisible.)
+
+Both tools detect this and say so: `status` warns when the snapshot is older
+than 180s, and `burn` reports its median sampling interval and flags input that
+looks activity-driven rather than continuous. `check` is unaffected — for parser
+regression, sparse real-world samples are as good as dense ones.
+
 ## Tests
 
 ```bash
 uv run --with pytest pytest tests/ -q
 ```
 
-80 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
+86 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
 exercises the installed entry points — run it after `uv tool install .`
 
 ## Declaring the model
