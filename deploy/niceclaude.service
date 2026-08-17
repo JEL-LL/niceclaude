@@ -1,0 +1,50 @@
+# niceclaude poller -- systemd USER unit.
+#
+#   install:  cp niceclaude.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now niceclaude
+#   logs:     journalctl --user -u niceclaude -f
+#
+# A user unit only runs while the user has a session. For the daemon to keep
+# polling on a headless box, or across logout, enable lingering ONCE:
+#
+#             loginctl enable-linger $USER
+#
+# Without it systemd stops the whole user manager at logout and the daemon dies
+# with it -- `niceclaude status <folder>` will then show a snapshot age that
+# only grows.
+
+[Unit]
+Description=niceclaude usage poller
+After=default.target
+# `watch` exits 1 immediately if another daemon already holds the pidfile;
+# without a start limit Restart=always would spin on that. 5 failures in 5
+# minutes and systemd gives up (systemctl --user reset-failed niceclaude).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# %h is the user's home; never hardcode /home/<name> here.
+ExecStart=%h/.local/bin/niceclaude watch --interval 60
+# Graceful stop via the pidfile, so the unit never has to match on process name.
+ExecStop=%h/.local/bin/niceclaude stop
+# The daemon does not unlink its pidfile when killed by SIGTERM (Python's
+# default handler skips the cleanup), and a leftover PID can later be reused by
+# an unrelated process, which would make the next `watch` refuse to start.
+# If you override the data directory with Environment=NICECLAUDE_DIR=..., point
+# this line at the same place.
+ExecStopPost=-/bin/rm -f %h/.local/share/niceclaude/daemon.pid
+
+# `watch` shells out to `claude -p /usage`, so BOTH binaries must be on this
+# PATH. Add wherever your `claude` lives if it is not one of these.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+Restart=always
+RestartSec=15
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
