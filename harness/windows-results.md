@@ -474,11 +474,17 @@ here only because this was the first non-UTC, non-UTF-8 machine to run the tool.
 - `policy.json` holds three rules, all `paced: false`.
 - `C:\ncwork\` holds the scratch folders and the settings fragments used for the
   command-form matrix.
-- `%LOCALAPPDATA%\niceclaude\usage.jsonl` contains **21 pre-fix samples with
-  mojibake `raw`**, so `niceclaude check` reports 40 unparsed-line problems
-  against them. They cannot be repaired — the corruption is at capture. Delete
-  the file to reset, or keep it as a record of the bug.
-- `daemon.pid` is present but stale (see check 6); harmless.
+- `usage.jsonl` was **deleted** at the end of the run. It held 31 samples from
+  this validation only (14:37Z–15:09Z), 20 of them with mojibake `raw` from
+  before the encoding fix. Those 20 could not be repaired — the corruption
+  happens at capture, not at storage — so `niceclaude check` reported 40
+  unparsed-line problems against them, which would have looked like a live
+  parser fault to anyone running `check` later. The 11 post-fix samples had no
+  analytical value on their own. `check` handles the empty log cleanly
+  (`no records`, exit 1).
+- `daemon.pid` was stale after `stop` (see check 6) and has been removed; no
+  daemon was running. The behaviour is recorded above, so the artifact was not
+  worth keeping.
 
 ## Open questions for the maintainer
 
