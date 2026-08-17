@@ -35,7 +35,7 @@ Current week (Fable): 2% used · resets Aug 15, 11:59pm (UTC)
 
 Distinct values observed across 100+ samples: `2, 5, 11, 14, 15, 16, ...` —
 never a decimal. This is not merely observed but **guaranteed by the renderer**,
-which emits `Math.floor(a.utilization)` (§11).
+which floors the value to a whole number before formatting it (§11).
 
 The 1% quantum is load-bearing for the control law; see `design-decisions.md`
 §4. It can now be relied on rather than defended against.
@@ -133,7 +133,7 @@ seven_day_sonnet, cinder_cove, extra_usage, limits
 ```
 
 **`seven_day_opus` exists** — contrary to the working assumption that only Fable
-has a per-model budget. `Cyf` does not render it directly; only `five_hour`,
+has a per-model budget. The renderer does not emit it directly; only `five_hour`,
 `seven_day`, and (for `max`/`team`/null subscriptions) `seven_day_sonnet` are
 hardcoded, with everything else arriving through the dynamic `model_scoped`
 projection. `extra_usage` has never been observed rendered.
@@ -249,30 +249,33 @@ Universal, installable offline, works on Windows without modification.
 
 ---
 
-## 11. The renderer, read from the binary
+## 11. How the renderer behaves (established by inspecting the shipped binary)
 
-The single most useful artefact found. `/usage` output is produced by this
-function (reformatted from the minified bundle):
+The most useful thing we learned, and it settles several previously open
+questions. What follows is a **description of observed behaviour**, written from
+our own reading — deliberately not a copy of Anthropic's source, which is theirs
+and not ours to republish. In pseudocode of our own:
 
-```js
-function Cyf(e){
-  let {rate_limits: t, subscription_type: r} = e;
-  if (!t) return null;
-  let n = r==="max" || r==="team" || r===null,
-  o = [{title:"Current session",           limit: t.five_hour},
-       {title:"Current week (all models)", limit: t.seven_day},
-       ...n ? [{title:"Current week (Sonnet only)", limit: t.seven_day_sonnet}] : [],
-       ...ZJt(t.limits, _ut())], i = [];
-  for (let {title:s, limit:a} of o) {
-    if (!a || a.utilization === null) continue;
-    let l = a.resets_at ? ` \xB7 resets ${n0r(a.resets_at,!0,!0,!0)}` : "";
-    i.push(`${s}: ${Math.floor(a.utilization)}% used${l}`)
-  }
-  return i.length > 0 ? i.join("\n") : null
-}
+```
+render(payload):
+    if payload has no rate_limits:            emit nothing at all
+    rows = [ ("Current session",            five_hour),
+             ("Current week (all models)",   seven_day) ]
+    if subscription is max / team / unset:
+        rows += ("Current week (Sonnet only)", seven_day_sonnet)
+    rows += one row per model-scoped limit, titled by a server-supplied
+            display name
+
+    for (title, limit) in rows:
+        if limit missing, or its utilization is null:   skip this row entirely
+        suffix = " · resets <formatted time>"   if the limit has a reset time
+                 ""                            otherwise
+        emit "<title>: <floor(utilization)>% used<suffix>"
+
+    if no rows survived:                       emit nothing at all
 ```
 
-Five things follow, and they settle questions that were previously open:
+Five consequences follow:
 
 1. **There is no over-limit branch.** `utilization` is just a number; at the
    limit it renders `100% used` in exactly the same format. The "we have never
@@ -281,10 +284,13 @@ Five things follow, and they settle questions that were previously open:
 2. **It cannot hang on rate limits.** This is a pure formatter over an
    already-fetched status payload. No inference call is involved, which is also
    why polling it costs no tokens.
-3. **Integers by construction** — `Math.floor`.
-4. **The reset clause is genuinely optional** — `a.resets_at ? … : ""`. The
+3. **Integers by construction** — the utilization value is floored to a whole
+   number before it is formatted.
+4. **The reset clause is genuinely optional** — it is appended only when the
+   limit carries a reset time, and omitted entirely otherwise. The
    observed `Current session: 0% used` was correct behaviour, not a glitch.
-5. **Buckets vanish when `utilization` is null** (`continue`), and the entire
+5. **Buckets vanish when their utilization is null** — the row is skipped, not
+   zeroed — and the entire
    block is omitted when `rate_limits` is null (`if (!t) return null`). Parsing
    must key on labels and tolerate absence — never assume a fixed line count.
 
