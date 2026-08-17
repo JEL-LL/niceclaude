@@ -1,0 +1,105 @@
+name: publish
+
+# Releases are cut by pushing a tag:  git tag v0.1.0 && git push --tags
+# Nothing publishes on an ordinary push, so this workflow existing does not
+# commit anyone to a release.
+#
+# Uses PyPI Trusted Publishing: PyPI verifies this workflow's OIDC identity
+# directly, so there is no API token to create, store, rotate or leak. See
+# RELEASING.md for the one-time registration on PyPI's side.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Tag must match the declared version
+        # A tag that disagrees with pyproject.toml produces a release nobody can
+        # reproduce from source. Cheap to check, miserable to discover later.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          echo "tag=$tag  pyproject=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      - name: Tests must pass before anything is published
+        run: uv run --with pytest pytest tests/ -q
+
+      - name: Build
+        run: uv build
+
+      - name: Validate the metadata PyPI will render
+        run: uv run --with twine twine check dist/*
+
+      - name: Install the built wheel and smoke-test it
+        # Catches packaging faults the source tree cannot: missing console
+        # scripts, modules left out of the wheel, a broken optional extra.
+        shell: bash
+        run: |
+          uv tool install "$(ls dist/*.whl)[plot]"
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: Installed entry points work
+        run: uv run --no-project python tests/smoke_installed.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    # Rehearsal. Validates the whole pipeline without consuming the real name
+    # or burning a version number on the index that matters.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write        # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi         # add a required reviewer here for a manual gate
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -220,6 +220,13 @@ it on Windows, confirm:
 - that the `niceclaude-hook.exe` launcher's startup cost is still in the tens of
   milliseconds rather than hundreds.
 
+## Releasing
+
+See [RELEASING.md](RELEASING.md). Publishing is a tag push; the workflow builds,
+tests, validates metadata, and installs and smoke-tests the built wheel before
+anything reaches an index. Authentication is PyPI Trusted Publishing, so there
+is no API token anywhere.
+
 ## Design notes
 
 `harness/` carries the design record — the control law and why it has that
