@@ -47,7 +47,8 @@ from datetime import datetime, timedelta, timezone
 from ._shared import (  # noqa: E402
     CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, LOG_PATH,
     POLICY_PATH, SETTINGS_PATH,
-    STATE_PATH, WINDOW_SECONDS, model_matches, norm_path, normalize_enforce,
+    MAX_STALE, STATE_PATH, WINDOW_SECONDS, model_matches, norm_path,
+    normalize_enforce,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -591,7 +592,15 @@ def cmd_status(path):
     with open(STATE_PATH, encoding="utf-8") as fh:
         st = json.load(fh)
     now = time.time()
-    print(f"\nsnapshot age:   {int(now) - st['ts_epoch']}s")
+    age = int(now) - st["ts_epoch"]
+    print(f"\nsnapshot age:   {age}s")
+    if age > MAX_STALE:
+        print(f"  WARNING: older than {MAX_STALE}s. The daemon is probably not "
+              f"running.\n"
+              f"           Paced folders still self-heal (the hook refreshes on\n"
+              f"           demand, costing ~2s on that tool call), but nothing is\n"
+              f"           sampling while you are idle, so `burn` and `plot` will\n"
+              f"           be biased. Start it with: niceclaude watch")
     for k, b in st["buckets"].items():
         enforced = ((k == "session" and "session" in enforce)
                     or (k == "week:all models" and "week" in enforce)
@@ -658,7 +667,21 @@ def cmd_burn(bin_minutes):
             else:
                 slot[idx] = [b["pct"], b["pct"]]
 
-    print(f"burn rate over {len(records)} samples, {bin_minutes}-minute bins\n")
+    gaps = sorted(b["ts_epoch"] - a["ts_epoch"]
+                  for a, b in zip(records, records[1:]))
+    median_gap = gaps[len(gaps) // 2] if gaps else 0
+    print(f"burn rate over {len(records)} samples, {bin_minutes}-minute bins")
+    print(f"median sampling interval: {median_gap}s\n")
+    if median_gap > 150:
+        # The daemon polls every 60s. A much larger median means most samples
+        # came from the hook's on-demand refresh, which only fires on paced
+        # folders while work is actually happening -- so idle time is simply
+        # absent from the record and every "average" below is inflated.
+        print("  WARNING: sampling looks activity-driven, not continuous.\n"
+              "           These figures see only periods when paced work was\n"
+              "           running, so idle time is missing and the average rates\n"
+              "           below are overstated. Run `niceclaude watch` for a\n"
+              "           representative baseline.\n")
     for key in sorted(series):
         rates, total_delta, total_hours = [], 0.0, 0.0
         window_seconds = None
