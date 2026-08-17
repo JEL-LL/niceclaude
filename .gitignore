@@ -4,3 +4,20 @@ __pycache__/
 uv.lock
 dist/
 .pytest_cache/
+
+# niceclaude runtime state. Never source, and usage.jsonl contains this
+# account's actual consumption figures -- keep it out of a public repo even if
+# someone points NICECLAUDE_DIR inside the working tree.
+usage.jsonl
+state.json
+policy.json
+daemon.pid
+hook.log
+niceclaude-usage.png
+
+# Credentials, defensively. Nothing here should ever produce these, but a
+# public repo is the wrong place to discover otherwise.
+.credentials.json
+.env
+*.pem
+*.key

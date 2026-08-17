@@ -9,6 +9,16 @@ Read `harness/README.md` first for what the tool is and how it fits together,
 then `design-decisions.md` §7 (path handling) and §14 (daemon lifecycle), which
 are where the Windows-specific risk concentrates.
 
+**CI already covers part of this.** `.github/workflows/tests.yml` runs the unit
+suite and `tests/smoke_installed.py` on `windows-latest`, which exercises the
+console scripts, `install`, real filesystem path matching, an actual brake, and
+the kill switch. Check the latest run before doing anything by hand — if it is
+green, steps 1, 2, 3, 6 and 8 are largely done for you.
+
+What CI **cannot** cover is anything needing Claude Code installed and
+authenticated: **step 4 is the one that matters and only a real machine can do
+it.** Steps 5 and 7 also need a real install.
+
 **Record your results in `harness/windows-results.md`** (create it), with the
 version banner from step 0 at the top. Where something fails, capture the exact
 output — a paraphrase is not useful to whoever fixes it.

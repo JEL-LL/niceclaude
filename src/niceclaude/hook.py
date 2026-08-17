@@ -67,6 +67,23 @@ def resolve(policy, cwd):
     return best
 
 
+def paced_entry(policy, cwd):
+    """The policy entry governing `cwd`, or None if it is not paced at all.
+
+    Split out so the hot path can answer "is this folder even paced?" from
+    policy.json alone -- no snapshot, no network, no subprocess. Getting that
+    order wrong made unpaced folders pay a ~2s `claude -p /usage` refresh on
+    every tool call whenever the snapshot was stale, which is the normal state
+    of affairs if the hook is installed but no daemon is running.
+    """
+    if not (policy.get("global") or {}).get("enabled", True):
+        return None
+    match = resolve(policy, cwd)
+    if match is None or not match[1].get("paced", False):
+        return None
+    return match[1]
+
+
 def decide(policy, state, cwd, now, degraded=False, event=None):
     """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..}.
 
@@ -86,14 +103,10 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
     would have turned a configured m0 of 0 into 5. dict.get with a default only
     fires on a missing key.
     """
-    if not (policy.get("global") or {}).get("enabled", True):
+    entry = paced_entry(policy, cwd)
+    if entry is None:
         return {"paced": False}
 
-    match = resolve(policy, cwd)
-    if match is None or not match[1].get("paced", False):
-        return {"paced": False}
-
-    entry = match[1]
     defaults = policy.get("defaults") or {}
     m0 = entry.get("m0", defaults.get("m0", DEFAULT_M0))
     m1 = entry.get("m1", defaults.get("m1", DEFAULT_M1))
@@ -209,6 +222,13 @@ def run(cwd, event=None):
     while True:
         now = time.time()
         policy = load_json(POLICY_PATH, {})
+
+        # Cheapest possible gate, and it must come first: an unpaced folder
+        # needs no usage data, so it must never trigger a refresh. This is the
+        # common case -- every foreground session, on every tool call.
+        if paced_entry(policy, cwd) is None:
+            return brake_start, "unpaced"
+
         state = load_json(STATE_PATH, {})
         age = snapshot_age(state, now)
 

@@ -1,0 +1,84 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Windows matters most here. The tool is written to be cross-platform but
+    # has only ever been exercised on Linux, and the riskiest code -- path
+    # normalization for folder policy -- fails *silently* when it is wrong: a
+    # folder looks paced while being completely ungoverned. A free Windows
+    # runner closes most of harness/windows-handoff.md without needing a
+    # Windows machine. What it cannot cover is anything requiring Claude Code
+    # itself to be installed and authenticated, notably whether Claude Code
+    # invokes hooks synchronously on Windows (handoff check 4).
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Unit tests
+        run: uv run --with pytest pytest tests/ -q
+
+      - name: Install the tool
+        run: uv tool install .
+
+      - name: Put the tool bin directory on PATH
+        shell: bash
+        run: echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: Installed entry points, end to end
+        # Exercises the console scripts, `install`, real filesystem path
+        # matching, an actual brake, and the kill switch. Needs no Claude Code
+        # and no network.
+        run: uv run --no-project python tests/smoke_installed.py
+
+  plot:
+    # matplotlib is an optional extra; check it actually resolves and renders.
+    name: plot extra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - name: Render from a synthetic log
+        run: |
+          uv run --with matplotlib python - <<'PY'
+          import os, sys, time
+          sys.path.insert(0, "src")
+          from niceclaude import plot
+          from niceclaude.cli import parse_usage
+          # A plausible 2h slice of a 5h window: usage climbing to 30%, with a
+          # real reset time so the pace-line arithmetic produces sane numbers
+          # rather than a nonsense overshoot. %I is zero-padded and portable;
+          # %-I is a glibc extension and must not be used here.
+          now = int(time.time())
+          reset = time.strftime("%b %d, %I:%M%p", time.gmtime(now + 3 * 3600))
+          recs = [
+              {"ts_epoch": now - (120 - i) * 60, "exit_code": 0,
+               "raw": f"Current session: {i // 4}% used · resets {reset} (UTC)\n"}
+              for i in range(120)
+          ]
+          series = plot.collect(recs, parse_usage)
+          assert "session" in series, f"expected a session bucket, got {list(series)}"
+          assert plot.render(series, "ci-plot.png") == 0, "render failed"
+          assert os.path.getsize("ci-plot.png") > 10000, "suspiciously small png"
+          print("plot rendered OK")
+          PY
