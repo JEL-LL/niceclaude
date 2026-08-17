@@ -363,3 +363,48 @@ If it hangs instead, that is itself the answer — record how long before giving
 **Ask them to read the file before sending it.** The advisory block can list
 `Top skills`, `Top plugins` and `Top MCP servers` — internal tooling names that
 should not travel into a public repo unreviewed.
+
+---
+
+## 14. Reported usage is only *approximately* monotonic
+
+The design leans on usage never falling inside a window: it is what makes a
+stale snapshot a usable lower bound (`design-decisions.md` §12) and what makes
+the wake time solvable in closed form (§6). Measured against 4015 samples, that
+holds — but not exactly.
+
+Observed live, with an unchanged reset label:
+
+```
+14:39  Current session: 4% used · resets Aug 17, 7pm (UTC)
+14:40  Current session: 4% used · resets Aug 17, 7pm (UTC)
+14:41  Current session: 3% used · resets Aug 17, 7pm (UTC)   <-- fell
+14:42  Current session: 6% used · resets Aug 17, 7pm (UTC)
+```
+
+Not a parse error: the raw output really says 3%. The cause is almost certainly
+§11's `floor` — the renderer floors a float, so a small backend recalculation
+crossing an integer boundary (4.02 → 3.98) surfaces as a whole point.
+
+Frequency across the corpus:
+
+| Bucket | Samples | Within-window decreases |
+|---|---|---|
+| `session` | 4015 | **1** (0.02%), of 1 point |
+| `week:all models` | 4015 | 0 |
+| `week:Fable` | 4015 | 0 |
+
+**This does not weaken the safety argument.** The hook already compares
+`pct + 1` against the line (§5 of `design-decisions.md`), so one point of
+downward noise sits inside a margin that exists anyway. "Stale data is a lower
+bound" survives ±1.
+
+**It did make `check` cry wolf**, which matters more than it sounds: this was
+the *only* anomaly in the entire corpus, and a checker that is routinely wrong
+stops being read. `check` now tolerates a 1-point drop.
+
+The tolerance is applied against the window's **running maximum**, not the
+previous sample. Comparing to the predecessor would tolerate a run of 1-point
+drops indefinitely, so a steady slide — which rounding cannot produce, and which
+would indicate a real parser fault — could walk down one point at a time
+unnoticed.

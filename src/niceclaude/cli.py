@@ -102,6 +102,15 @@ def classify(line):
 
 RESET_JITTER = 120  # the server rounds; 8:09pm and 8:10pm are the same instant
 
+# Reported usage is very nearly monotonic within a window, but not exactly.
+# The renderer floors a float, so a small backend recalculation that crosses
+# an integer boundary shows up as a 1-point drop (4.02 -> 3.98 renders 4 -> 3).
+# Measured once in 4015 session samples, never in a weekly bucket. Flagging it
+# would make `check` cry wolf over the only anomaly in the whole corpus, and a
+# checker that is routinely wrong stops being read. Larger drops are still
+# reported: those cannot be rounding.
+PCT_JITTER = 1
+
 HOOK_EVENTS = ["PreToolUse", "SubagentStart"]
 
 
@@ -386,7 +395,7 @@ def cmd_check():
             if b["resets_raw"] is not None and b["resets_epoch"] is None:
                 problems.append(f"{ts}  {key}: unparseable reset {b['resets_raw']!r}")
             if key in prev:
-                ppct, preset, pts = prev[key]
+                ppct, preset, pts = prev[key]   # ppct is the window's running max
                 rolled = (
                     (b["resets_epoch"] is not None and preset is not None
                      and abs(b["resets_epoch"] - preset) > RESET_JITTER)
@@ -395,11 +404,24 @@ def cmd_check():
                 )
                 # Usage cannot fall inside a window. If it did and the window
                 # did not roll, the parser is wrong.
-                if not rolled and None not in (b["pct"], ppct) and b["pct"] < ppct:
+                if (not rolled and None not in (b["pct"], ppct)
+                        and b["pct"] < ppct - PCT_JITTER):
                     problems.append(
                         f"{ts}  {key}: usage DECREASED {ppct}% -> {b['pct']}% with no "
-                        f"window roll (prev {pts}) -- likely misparse")
-            prev[key] = (b["pct"], b["resets_epoch"], ts)
+                        f"window roll (peak seen {pts}) -- likely misparse")
+                # Compare against the window's running MAX, not the previous
+                # sample. Against the previous sample a run of 1-point drops is
+                # tolerated indefinitely, so a steady slide -- which rounding
+                # cannot produce -- would slip through one point at a time.
+                if b["pct"] is None:
+                    peak, when = ppct, pts
+                elif rolled or ppct is None or b["pct"] >= ppct:
+                    peak, when = b["pct"], ts
+                else:
+                    peak, when = ppct, pts
+                prev[key] = (peak, b["resets_epoch"], when)
+            else:
+                prev[key] = (b["pct"], b["resets_epoch"], ts)
 
     all_keys = set().union(*(set(r.get("buckets", {})) for r in records))
     late = all_keys - set(records[0].get("buckets", {}))
