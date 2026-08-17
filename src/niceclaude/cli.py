@@ -64,8 +64,14 @@ LINE_RE = re.compile(
     r"(?:\s*\((?P<label>[^)]*)\))?"
     r"\s*:\s*"
     r"(?P<pct>[<>]?\s*[\d.]+)\s*%\s*used"
+    # The timezone is whatever the renderer prints in parentheses. [A-Z]{2,5}
+    # only ever matched a box set to UTC; a normal workstation reports an IANA
+    # name ("America/New_York"), which failed the class, failed the optional
+    # group, and so failed the whole line -- losing the session and
+    # week:all-models buckets entirely. Accept anything up to the closing
+    # paren, the same way the bucket label above already does.
     r"(?:\s*[·*|-]\s*resets\s+(?P<resets>.+?)"
-    r"\s*\((?P<tz>[A-Z]{2,5})\))?"
+    r"\s*\((?P<tz>[^)]+)\))?"
     r"\s*$",
     re.IGNORECASE,
 )
@@ -105,22 +111,64 @@ def utcnow():
 
 # --- parsing -----------------------------------------------------------------
 
-def parse_reset(text, now):
+def resolve_tz(label):
+    """tzinfo for a `/usage` timezone label, or None if it cannot be resolved.
+
+    On a machine set to UTC the renderer prints "UTC"; on an ordinary
+    workstation it prints an IANA name -- "America/New_York" -- and the time
+    beside it is local, not UTC.
+
+    zoneinfo resolves IANA names wherever a tz database exists, which covers
+    Linux and macOS. Windows ships none: `available_timezones()` is empty and
+    ZoneInfo() raises ZoneInfoNotFoundError unless the `tzdata` package is
+    installed. This project is deliberately dependency-free, so None is
+    returned there and the caller reads the time as local -- which is what the
+    label says it is.
+    """
+    if not label:
+        return None
+    key = label.strip()
+    if key.upper() in ("UTC", "GMT", "Z"):
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(key)
+    except Exception:
+        return None
+
+
+def parse_reset(text, now, tz_label=None):
     """'Aug 14, 8:10pm' -> aware UTC datetime, or None. Never raises.
 
     The year is absent from the output. Supply it explicitly rather than
     patching it in afterwards: year-less strptime is deprecated in 3.14+ and
     mishandles Feb 29. Reset times are always ahead of now, so try this year
     then next and keep whichever lands in the future.
+
+    The time is expressed in the zone named beside it, NOT in UTC. Stamping it
+    UTC was correct only because the machine this was written on was set to
+    UTC. On a workstation in America/New_York it placed every reset four hours
+    early, which inflates the elapsed fraction f_t, which raises the pace line,
+    which permits spending that should have been braked -- an error in the
+    fail-OPEN direction, the one direction this tool must never fail in.
     """
     text = text.strip().rstrip(".")
+    tz = resolve_tz(tz_label) if tz_label else timezone.utc
     for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p", "%b %d %I:%M%p", "%b %d %I%p"):
         for year in (now.year, now.year + 1):
             try:
                 dt = datetime.strptime(f"{year} {text}", f"%Y {fmt}")
             except ValueError:
                 continue
-            dt = dt.replace(tzinfo=timezone.utc)
+            if tz is not None:
+                dt = dt.replace(tzinfo=tz).astimezone(timezone.utc)
+            else:
+                # Label named a zone we cannot resolve, so read it as local
+                # time. astimezone() on a naive datetime assumes the system
+                # zone and applies that zone's DST rules for the date in
+                # question, which is exactly right when the label is the
+                # machine's own zone -- which is what the renderer emits.
+                dt = dt.astimezone(timezone.utc)
             if dt >= now - timedelta(days=1):  # a day of slop
                 return dt
     return None
@@ -164,7 +212,7 @@ def parse_usage(raw, now):
         key = f"{window}:{label}" if label else window
         pct, approx = parse_pct(m.group("pct"))
         resets_raw = m.group("resets")
-        resets = parse_reset(resets_raw, now) if resets_raw else None
+        resets = parse_reset(resets_raw, now, m.group("tz")) if resets_raw else None
         buckets[key] = {
             "window": window,
             "label": label or None,
@@ -183,8 +231,18 @@ def sample_once():
     now = utcnow()
     started = time.monotonic()
     try:
+        # encoding is explicit: text=True alone decodes with locale.getencoding(),
+        # which on Windows is the ANSI code page (cp1252 on a US install), not
+        # UTF-8. `/usage` separates its fields with U+00B7, emitted as the UTF-8
+        # bytes C2 B7 -- read as cp1252 those become "Â·", LINE_RE stops
+        # matching, and the session and week:all-models buckets vanish from the
+        # snapshot while week:Fable (which carries no separator) still parses.
+        # The hook then finds no enforceable bucket and brakes blind forever.
+        # errors="replace" keeps a partial read surfacing as an unparsed line
+        # rather than an exception that would discard the whole sample.
         proc = subprocess.run(["claude", "-p", "/usage"],
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=120,
+                              encoding="utf-8", errors="replace")
         raw, err, rc = proc.stdout, proc.stderr, proc.returncode
     except Exception as exc:
         raw, err, rc = "", f"{type(exc).__name__}: {exc}", -1
@@ -394,6 +452,19 @@ def cmd_install(force):
     # Hook commands are run through a shell, so a path containing spaces
     # (C:\Users\...\Program Files\...) has to be quoted or it parses as two
     # arguments and the hook silently never fires.
+    #
+    # On Windows that shell is a POSIX one -- Claude Code runs hooks through Git
+    # Bash, verified by a hook command of `echo x > /c/tmp/marker` landing at
+    # C:\tmp\marker. There, backslash is an ESCAPE character, so a native path
+    # like C:\Users\me\.local\bin\niceclaude-hook.exe loses every separator and
+    # becomes C:Usersme.localbinniceclaude-hook.exe, no such file exists, and
+    # the hook never runs. Nothing reports this: the folder looks paced while
+    # being completely ungoverned, the worst failure mode this tool has.
+    #
+    # Forward slashes avoid the escaping entirely and are accepted by the
+    # Windows API, so the command works whether the shell is sh or cmd.exe.
+    if os.name == "nt":
+        hook_exe = hook_exe.replace("\\", "/")
     command = f'"{hook_exe}"' if " " in hook_exe else hook_exe
 
     # A --settings fragment, NOT ~/.claude/settings.json. Hooks merge additively

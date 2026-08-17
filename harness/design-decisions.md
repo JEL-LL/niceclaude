@@ -152,6 +152,24 @@ with `normcase` + `normpath` + `realpath`, which matters on Windows where
 `C:\Proj` and `c:\proj` are the same directory but would otherwise be different
 policy keys.
 
+**One path is not ours to normalize: the hook command in `settings.json`.**
+Claude Code runs hook commands through a shell, and on Windows that shell is
+**Git Bash**, where a backslash is an escape character. A native path like
+`C:\Users\me\.local\bin\niceclaude-hook.exe` is silently eaten before exec — no
+error, no log, and every paced folder runs completely ungoverned while still
+reporting itself paced. `cmd_install` therefore writes forward slashes on
+Windows; they need no escaping and are accepted by the Windows API under both
+`sh` and `cmd.exe`. Quoting still covers spaces, and is orthogonal.
+
+Verified by a hook command of `echo x > /c/tmp/marker` landing at
+`C:\tmp\marker`, and by a mangled backslash path producing a file literally
+named `C<U+F03A>ncworkM-user.txt`. See `windows-results.md`.
+
+Two normalization limits found on Windows and left as-is: `realpath` resolves a
+`subst` drive back to its target (so `Z:\proj` and `C:\proj` share a policy,
+which is right), but it does **not** resolve a UNC path to its local equivalent,
+so `\\server\share\proj` and `C:\proj` are separate policy keys.
+
 **Known limitation:** two agents running in the *same* folder cannot have
 different policies. This surfaced when setting up a supervisor/worker pair —
 an unpaced supervisor babysitting a paced worker — where both would naturally

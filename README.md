@@ -164,8 +164,10 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-86 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
-exercises the installed entry points — run it after `uv tool install .`
+96 tests, no network, no tokens, under a second. One of them is skipped on
+Windows, which ships no timezone database. `tests/smoke_installed.py`
+additionally exercises the installed entry points — run it after
+`uv tool install .`
 
 ## Declaring the model
 
@@ -208,17 +210,31 @@ and that no line went unparsed.
   same pattern, so a name-based kill can take out its own wrapper. Use
   `niceclaude stop`.
 
-## Not yet verified on Windows
+## Windows
 
-The code is platform-neutral and the path handling uses `normcase`/`normpath`
-throughout, but everything so far has been exercised on Linux. Before trusting
-it on Windows, confirm:
+Verified on Windows 10 (PowerShell 5.1, Claude Code 2.1.228) — see
+[`harness/windows-results.md`](harness/windows-results.md). The freeze mechanism
+holds: Claude Code invokes the hook synchronously and blocks on it there too.
 
-- how Claude Code executes hook commands there (directly, or via `cmd.exe`), and
-  whether the quoting `install` emits for paths containing spaces survives it;
-- that the JSON payload arrives on stdin unchanged;
-- that the `niceclaude-hook.exe` launcher's startup cost is still in the tens of
-  milliseconds rather than hundreds.
+Three bugs surfaced on that first run, all now fixed:
+
+- **Claude Code runs hook commands through Git Bash on Windows**, where a
+  backslash is an escape character. The native path `install` used to write was
+  mangled before exec, so the hook never ran and every paced folder was silently
+  ungoverned. `install` now emits forward slashes, which need no escaping and
+  work under both `sh` and `cmd.exe`. This constraint is load-bearing: anything
+  that ever writes a hook command must keep it shell-safe.
+- **`/usage` must be decoded as UTF-8 explicitly.** `text=True` alone uses the
+  locale encoding — cp1252 on a US Windows install — which turned the U+00B7
+  separator into `Â·` and dropped the two most important buckets.
+- **The reset clause is in the timezone printed beside it, not UTC.** On a
+  machine that is not set to UTC this put every reset hours early, inflating the
+  elapsed fraction and raising the pace line — an error in the fail-open
+  direction. Affects any non-UTC machine, not just Windows.
+
+Two things to know rather than fix: the hook costs ~100ms per call there against
+~20ms on Linux (half of it the console-script launcher), and `niceclaude stop`
+leaves a stale `daemon.pid`, because `taskkill /F` cannot run the cleanup handler.
 
 ## Releasing
 
