@@ -27,7 +27,7 @@ import time
 
 from ._shared import (
     DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1,
-    HOOK_LOG_PATH, MAX_BRAKE,
+    HOOK_LOG_PATH, MAX_BRAKE, normalize_enforce,
     MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path,
 )
 
@@ -123,10 +123,16 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
     if span <= 0:
         span = 1  # a nonsensical config must not divide by zero
 
+    # Which windows this folder answers to. A project you are actively tending
+    # may want the 5-hour line to smooth it out while ignoring the weekly line,
+    # which exists to protect budget for days you are not here.
+    enforce = normalize_enforce(entry.get("enforce", defaults.get("enforce")))
     buckets = state.get("buckets") or {}
     enforced = [
         (k, b) for k, b in buckets.items()
-        if k in ("session", "week:all models") or model_matches(k, model)
+        if (k == "session" and "session" in enforce)
+        or (k == "week:all models" and "week" in enforce)
+        or ("model" in enforce and model_matches(k, model))
     ]
     if not enforced:
         return {"paced": True, "braked": True, "wake_at": now + chunk,

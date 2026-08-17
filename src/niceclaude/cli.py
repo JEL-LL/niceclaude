@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from ._shared import (  # noqa: E402
     CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, LOG_PATH,
     POLICY_PATH, SETTINGS_PATH,
-    STATE_PATH, WINDOW_SECONDS, model_matches, norm_path,
+    STATE_PATH, WINDOW_SECONDS, model_matches, norm_path, normalize_enforce,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -521,7 +521,7 @@ def _watch_loop(interval):
         time.sleep(max(1, interval - rec["elapsed_ms"] / 1000))
 
 
-def cmd_on(path, model, m0, m1, fanout_reserve):
+def cmd_on(path, model, m0, m1, fanout_reserve, enforce):
     pol = load_policy()
     key = norm_path(path)
     entry = pol["paths"].get(key, {})
@@ -534,6 +534,8 @@ def cmd_on(path, model, m0, m1, fanout_reserve):
         entry["m1"] = m1
     if fanout_reserve is not None:
         entry["fanout_reserve"] = fanout_reserve
+    if enforce is not None:
+        entry["enforce"] = sorted(normalize_enforce(enforce))
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
@@ -576,10 +578,12 @@ def cmd_status(path):
     m0 = entry.get("m0", d.get('m0', DEFAULT_M0))
     m1 = entry.get("m1", d.get('m1', DEFAULT_M1))
     model = (entry.get("model") or "").lower()
+    enforce = normalize_enforce(entry.get("enforce", d.get("enforce")))
     print(f"matched rule:   {matched}")
     print(f"  paced         {entry.get('paced', False)}")
     print(f"  model         {entry.get('model') or '<undeclared>'}")
     print(f"  m0 / m1       {m0} / {m1}")
+    print(f"  enforces      {', '.join(sorted(enforce))}")
 
     if not os.path.exists(STATE_PATH):
         print("\nno snapshot yet -- is `niceclaude watch` running?")
@@ -589,7 +593,9 @@ def cmd_status(path):
     now = time.time()
     print(f"\nsnapshot age:   {int(now) - st['ts_epoch']}s")
     for k, b in st["buckets"].items():
-        enforced = k in ("session", "week:all models") or model_matches(k, model)
+        enforced = ((k == "session" and "session" in enforce)
+                    or (k == "week:all models" and "week" in enforce)
+                    or ("model" in enforce and model_matches(k, model)))
         if b["pct"] is None:
             print(f"  {k:22} unusable (no percentage)")
             continue
@@ -727,6 +733,9 @@ def main():
     o.add_argument("--m0", type=float); o.add_argument("--m1", type=float)
     o.add_argument("--fanout-reserve", type=float, dest="fanout_reserve",
                    help="extra reserve demanded of SubagentStart, on top of m1")
+    o.add_argument("--enforce",
+                   help="comma-separated windows to pace against: session, week, "
+                        "model (default: all three)")
     f = sub.add_parser("off", help="stop pacing a folder")
     f.add_argument("path")
     g = sub.add_parser("global", help="master switch for every folder")
@@ -763,7 +772,7 @@ def main():
     if a.cmd == "stop":
         return cmd_stop()
     if a.cmd == "on":
-        return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve)
+        return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce)
     if a.cmd == "off":
         return cmd_off(a.path)
     if a.cmd == "global":

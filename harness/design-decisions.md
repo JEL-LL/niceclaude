@@ -376,3 +376,39 @@ loudly.
 `NICECLAUDE_DIR` now also relocates config (to `<dir>/config`) unless
 `NICECLAUDE_CONFIG_DIR` is set explicitly. One mount is now sufficient, and the
 override remains available for anyone who wants the directories apart.
+
+---
+
+## 17. A folder chooses which windows it answers to
+
+The windows are not interchangeable. They exist for different reasons:
+
+- The **5-hour window** smooths a burst. It rises at 20 %/h, close to the rate
+  heavy work consumes it, so it mostly stops you sprinting rather than stopping
+  you working (`platform-findings.md`, and the duty-cycle table in
+  `open-questions.md` §3).
+- The **weekly window** protects budget for days you are not at the machine. It
+  rises at 0.60 %/h and is the real governor.
+
+Applying both to everything conflates those purposes. Work you are actively
+tending has no reason to answer to a line whose whole job is to reserve budget
+for your absence — you are *there*, spending it deliberately.
+
+`enforce` selects any combination of `session`, `week`, and `model`; the default
+is all three, preserving prior behaviour. `--enforce session` is the
+round-robin foreground case: several projects each smoothed across their own
+5-hour block, none of them throttled by a weekly budget being spent on purpose.
+
+Two deliberate choices:
+
+- **A malformed or empty value enforces everything.** This tool restrains
+  spending, so an unparseable config must not silently un-pace a folder that
+  still reports itself as paced. Failing toward restraint is the only safe
+  direction.
+- **Choosing a window that is absent from the snapshot brakes as `blind`**, it
+  does not wave the agent through. If you asked to be paced against the session
+  window and no session bucket is reported, the honest answer is "cannot tell",
+  and the fail-safe applies (§11, §12).
+
+`niceclaude status` prints the enforced set and marks the others `ignored`, so
+the display can never disagree with the hook about what is being enforced.

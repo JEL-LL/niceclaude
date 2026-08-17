@@ -79,6 +79,26 @@ Two agents in the *same* folder necessarily share a policy. To run an unpaced
 supervisor alongside a paced worker, pace the **subdirectory** the worker runs
 in — longest-prefix only matches downward, so a parent stays untouched.
 
+## Pacing against only some windows
+
+Not every project should answer to every window. A project you are actively
+tending wants the 5-hour line to smooth it out, but the weekly line exists to
+protect budget for days you are *not* here — so it has no business throttling
+work you are doing right now.
+
+```bash
+niceclaude on ~/projects/alpha --model opus --enforce session
+```
+
+`--enforce` takes any combination of `session`, `week` and `model` (the
+per-model weekly bucket). The default is all three. `niceclaude status` prints
+which windows a folder answers to and marks the rest `ignored`, so it never
+lies about what is actually being enforced.
+
+This is what makes pacing useful in the *foreground*: several projects worked
+round-robin can each be smoothed across their 5-hour block without any of them
+being held back by a weekly budget you are deliberately spending.
+
 ## Holding fan-outs to a higher bar
 
 Spawning a dozen subagents commits to far more consumption than taking one more
@@ -129,7 +149,7 @@ Scheduled Task script.
 uv run --with pytest pytest tests/ -q
 ```
 
-60 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
+80 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
 exercises the installed entry points — run it after `uv tool install .`
 
 ## Declaring the model

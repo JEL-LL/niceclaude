@@ -75,6 +75,36 @@ DEFAULT_POLICY = {
 }
 
 
+# Which windows a folder is paced against. Not every project wants both: work
+# you are actively tending wants the 5-hour line to smooth it out, but has no
+# reason to answer to the weekly line, which exists to protect budget for days
+# you are not here.
+#   session -- the 5h window
+#   week    -- the shared weekly window (`week:all models`)
+#   model   -- the per-model weekly window, if the declared model has one
+DEFAULT_ENFORCE = ("session", "week", "model")
+VALID_ENFORCE = frozenset(DEFAULT_ENFORCE)
+
+
+def normalize_enforce(value):
+    """Coerce a configured `enforce` value to a set of known window names.
+
+    Falls back to enforcing everything when the value is missing, empty, or
+    contains nothing recognizable. That direction is deliberate: this tool
+    exists to restrain spending, so a malformed config must not silently
+    un-pace a folder that looks paced.
+    """
+    if value is None:
+        return set(DEFAULT_ENFORCE)
+    if isinstance(value, str):
+        value = [v.strip() for v in value.split(",")]
+    try:
+        chosen = {str(v).strip().lower() for v in value} & VALID_ENFORCE
+    except TypeError:
+        return set(DEFAULT_ENFORCE)
+    return chosen or set(DEFAULT_ENFORCE)
+
+
 def model_matches(bucket_key, model):
     """Does `bucket_key` name the per-model weekly bucket for `model`?
 
