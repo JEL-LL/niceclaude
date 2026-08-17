@@ -10,12 +10,11 @@ and the freeze mechanism is sound. But it never fired at all until the hook
 command was made shell-safe, because Claude Code runs hook commands through Git
 Bash, where the backslashes in a Windows path are escape characters.
 
-All three are fixed in this commit, with regression tests. Test suite is now
-**100 tests** (was 86): 99 passed + 1 skipped on Windows, 100 passed on Linux.
-Four of the new tests guard the source-encoding convention described at the end
-of this file.
-(The checks below were run against the 80-test tree this session started on;
-the baseline moved to 86 upstream while the work was in progress.)
+All three are fixed, with regression tests. The suite stands at **106 tests**,
+all passing on Windows, four of them guarding the source-encoding convention
+described at the end of this file. (The checks below were run against the
+80-test tree this session started on; the baseline moved several times upstream
+while the work was in progress.)
 
 ---
 
@@ -43,7 +42,7 @@ space (`C:\Users\Joshu`), so the spaced-path cases were constructed explicitly.
 | # | Check | Result |
 |---|---|---|
 | 1 | Install | **PASS** (one cosmetic note) |
-| 2 | Automated suite | **PASS** — 80/80 pre-fix, 96 post-fix (after rebase) |
+| 2 | Automated suite | **PASS** — 80/80 pre-fix, 106/106 now |
 | 3 | Hot-path latency | **PASS with a caveat** — ~102ms vs 19–22ms on Linux |
 | 4 | **Does Claude Code block on the hook?** | **FAIL → root-caused → FIXED → PASS** |
 | 5 | Paths with spaces | **FAIL (same root cause) → FIXED → PASS** |
@@ -490,11 +489,21 @@ here only because this was the first non-UTC, non-UTF-8 machine to run the tool.
 
 ## Open questions for the maintainer
 
-1. **The local-timezone inference in `resolve_tz`'s fallback** — see Bug 3.
-   Worth confirming against a machine whose Claude Code reports a zone it is not
-   actually in, if such a configuration exists.
+1. ~~**The local-timezone inference in `resolve_tz`'s fallback**~~ — **closed
+   upstream.** `tzdata` is now declared on Windows, so `zoneinfo` resolves the
+   IANA name and the inference never runs. The fallback remains as a backstop
+   for an environment without the package. The test that was skipped here for
+   want of a tz database now runs on Windows too.
 2. **Whether to ship the `.cmd` shim** for the ~49ms launcher overhead (check 3).
-3. **`design-decisions.md` §8** ("install as a `--settings` fragment") is
-   unaffected in its reasoning, but §7 (path handling) should probably gain a
-   note that the hook command is shell-interpreted by Git Bash on Windows —
-   that constraint is now load-bearing and is not obvious from the code.
+3. ~~**`design-decisions.md` §7**~~ — done in this branch: §7 now records that
+   the hook command is shell-interpreted by Git Bash on Windows, since that
+   constraint is load-bearing and not obvious from the code.
+
+## A footnote the hard way
+
+The U+00B7 separator is now written as an escape everywhere in code, because
+during this very session a PowerShell `Get-Content | Set-Content` round-trip
+double-encoded it **inside `LINE_RE`** — reproducing the Bug 2 mojibake from the
+opposite direction, an hour after fixing it. `tests/test_source_encoding.py`
+enforces the convention; it immediately caught a literal arriving in a new test
+file from another machine, which is the case it exists for.

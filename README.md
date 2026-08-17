@@ -171,8 +171,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-100 tests, no network, no tokens, under a second. One of them is skipped on
-Windows, which ships no timezone database. `tests/smoke_installed.py`
+106 tests, no network, no tokens, under a second. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 
