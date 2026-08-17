@@ -33,8 +33,31 @@ catches up.
 
 ## Install
 
+Not on PyPI yet — the release pipeline is in place but no version has been cut —
+so install from git:
+
 ```bash
-uv tool install niceclaude
+uv tool install "niceclaude[plot] @ git+https://github.com/JEL-LL/niceclaude"
+```
+
+Drop `[plot]` if you would rather not pull in matplotlib; everything except
+`niceclaude plot` works without it. Append a ref to pin:
+`...@v0.1.0` for a tag, or a commit SHA.
+
+Note that `uv tool upgrade niceclaude` reports *"Nothing to upgrade"* for a git
+install — it will not re-pull. To pick up new commits, run the install command
+again with `--force`.
+
+To hack on it, install from a clone instead:
+
+```bash
+git clone https://github.com/JEL-LL/niceclaude && cd niceclaude
+uv tool install --editable ".[plot]"   # source edits take effect with no reinstall
+```
+
+Then wire it up:
+
+```bash
 niceclaude install                     # writes a settings fragment pointing at the hook
 niceclaude on ~/projects/nightly --model opus
 niceclaude watch                       # the poller (run it under systemd, a

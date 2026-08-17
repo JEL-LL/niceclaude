@@ -5,15 +5,21 @@ sample to `usage.jsonl`, and publishes `state.json` for the hook to read. The
 hook does the pacing arithmetic itself, so **no snapshot means no pacing** —
 keeping this process alive is the whole job of everything in this directory.
 
-Install the tool first (`uv tool install niceclaude`, then `niceclaude install`);
-these files assume the executables are in `~/.local/bin`
+Install the tool first — it is not on PyPI yet, so from git:
+
+```bash
+uv tool install "niceclaude[plot] @ git+https://github.com/JEL-LL/niceclaude"
+niceclaude install
+```
+
+These files assume the executables are in `~/.local/bin`
 (`%USERPROFILE%\.local\bin` on Windows).
 
 | File | Use it when |
 | --- | --- |
 | `niceclaude.service` | Linux box with systemd and a user account — laptop, workstation, always-on server. Runs as *you*, not root. |
 | `docker-entrypoint.sh` | The agent runs in a container; the poller has to live and die with that container. |
-| `niceclaude-task.ps1` | Windows, started at logon. (Windows is still unverified — see the README's "Not yet verified on Windows".) |
+| `niceclaude-task.ps1` | Windows, started at logon. (Windows is verified end to end — see `harness/windows-results.md`.) |
 
 Only one daemon per data directory: `watch` writes `<data>/daemon.pid` and
 refuses to start if a live PID is already recorded there. Stop it with
