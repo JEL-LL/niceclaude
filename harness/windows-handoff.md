@@ -65,7 +65,7 @@ Check and record:
 uv run --with pytest pytest tests/ -q
 ```
 
-Expected: **52 passed**. The path tests are the likeliest failures — they
+Expected: **60 passed**. The path tests are the likeliest failures — they
 exercise `normcase`/`normpath` behaviour that differs on Windows (case
 insensitivity, backslash separators, drive letters).
 

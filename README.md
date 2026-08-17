@@ -129,7 +129,8 @@ Scheduled Task script.
 uv run --with pytest pytest tests/ -q
 ```
 
-52 tests, no network, no tokens, under a second.
+60 tests, no network, no tokens, under a second. `tests/smoke_installed.py` additionally
+exercises the installed entry points — run it after `uv tool install .`
 
 ## Declaring the model
 
