@@ -207,6 +207,55 @@ def test_no_rule_at_all(tree):
     assert hook.resolve({}, norm_path(str(tree / "a"))) is None
 
 
+def _anchor(path):
+    """The filesystem root containing `path`: "/" on POSIX, "C:\\" on Windows.
+
+    Derived from the path rather than hardcoded, so the drive-root case is the
+    one actually exercised when this suite runs on Windows.
+    """
+    drive, _ = os.path.splitdrive(norm_path(str(path)))
+    return drive + os.sep
+
+
+def test_root_rule_is_a_catch_all(tree):
+    """A rule on the root paces everything beneath it, not just the root.
+
+    The root is the one normalized path that already ends in a separator, so
+    appending another built "//" and matched nothing below it.
+    """
+    root = _anchor(tree)
+    pol = {"paths": {root: {"paced": True}}}
+    key, entry = hook.resolve(pol, norm_path(str(tree / "a" / "b" / "c")))
+    assert key == norm_path(root)
+    assert entry == {"paced": True}
+
+
+def test_root_rule_still_matches_the_root_itself(tree):
+    root = _anchor(tree)
+    pol = {"paths": {root: {"paced": True}}}
+    assert hook.resolve(pol, norm_path(root))[1] == {"paced": True}
+
+
+def test_deeper_rule_beats_the_root_rule(tree):
+    """The catch-all must remain the shallowest rule, so carve-outs still win."""
+    root = _anchor(tree)
+    pol = {"paths": {root: {"paced": True},
+                     str(tree / "a"): {"paced": False}}}
+    key, entry = hook.resolve(pol, norm_path(str(tree / "a" / "b")))
+    assert key == norm_path(str(tree / "a"))
+    assert entry["paced"] is False
+
+
+def test_cli_resolve_agrees_with_hook_on_a_root_rule(tree):
+    """`status` reads policy through its own resolver; the two must not drift."""
+    root = _anchor(tree)
+    pol = {"paths": {root: {"paced": True}}}
+    target = str(tree / "a" / "b")
+    matched, entry = cli.resolve(pol, target)
+    assert norm_path(matched) == norm_path(root)
+    assert entry == hook.resolve(pol, norm_path(target))[1]
+
+
 def test_resolve_skips_unusable_keys(tree):
     pol = {"paths": {str(tree / "a"): {"paced": True}, "\0bad": {"paced": True}}}
     key, entry = hook.resolve(pol, norm_path(str(tree / "a")))

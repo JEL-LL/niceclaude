@@ -105,6 +105,30 @@ niceclaude global off                        # break glass: release everything
 `policy.json` is re-read on every tool call, so turning pacing on or off takes
 effect on an already-running agent at its next checkpoint. No restart.
 
+### Pacing everything, and what `global` actually does
+
+`niceclaude global off` / `global on` is a **master kill switch only**. `off`
+suspends every rule at once; `on` restores them. It never *enables* pacing
+anywhere — a folder is paced if and only if some rule matches it, and `global`
+just gates whether those rules are consulted. It defaults to on, so `global on`
+is only ever an undo for a previous `global off`.
+
+To pace everything, pace a folder that contains it. The filesystem root is a
+valid rule and works as a catch-all:
+
+```bash
+niceclaude on  / --model opus          # or `niceclaude on C:\ --model opus`
+niceclaude off ~/projects/urgent       # then carve out what should run free
+niceclaude on  ~ --model opus          # narrower catch-all: just your home dir
+```
+
+Longest-prefix still decides, and the root is the shallowest rule there is, so
+every existing rule keeps overriding it and carve-outs work exactly as before.
+
+Even then, pacing only reaches sessions started with `--settings <fragment>`.
+That is deliberate, and the hook is not installed into `~/.claude/settings.json`
+to close the gap — see the section above.
+
 Two agents in the *same* folder necessarily share a policy. To run an unpaced
 supervisor alongside a paced worker, pace the **subdirectory** the worker runs
 in — longest-prefix only matches downward, so a parent stays untouched.
@@ -194,7 +218,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-106 tests, no network, no tokens, under a second. `tests/smoke_installed.py`
+110 tests, no network, no tokens, under a second. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 

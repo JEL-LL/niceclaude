@@ -28,7 +28,7 @@ import time
 from ._shared import (
     DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1,
     HOOK_LOG_PATH, MAX_BRAKE, normalize_enforce,
-    MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path,
+    MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path, path_within,
 )
 
 
@@ -53,7 +53,8 @@ def resolve(policy, cwd):
     rule can override a shallower one.
 
     Compares whole path components: a raw string prefix would let /foo/bar
-    match /foo/barbaz and silently pace the wrong tree.
+    match /foo/barbaz and silently pace the wrong tree. A rule on the
+    filesystem root is a legitimate catch-all and matches everything below it.
     """
     best = None
     for raw, entry in (policy.get("paths") or {}).items():
@@ -61,7 +62,7 @@ def resolve(policy, cwd):
             key = norm_path(raw)
         except (OSError, ValueError):
             continue
-        if cwd == key or cwd.startswith(key + os.sep):
+        if path_within(cwd, key):
             if best is None or len(key) > len(best[0]):
                 best = (key, entry)
     return best

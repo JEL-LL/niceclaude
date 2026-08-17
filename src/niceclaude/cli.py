@@ -48,7 +48,7 @@ from ._shared import (  # noqa: E402
     CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, LOG_PATH,
     POLICY_PATH, SETTINGS_PATH,
     MAX_STALE, STATE_PATH, WINDOW_SECONDS, model_matches, norm_path,
-    normalize_enforce,
+    normalize_enforce, path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -345,13 +345,15 @@ def resolve(pol, path):
     rule can override a shallower one.
 
     Matching is on path components, not raw string prefix -- otherwise
-    /foo/bar would match /foo/barbaz and silently pace the wrong tree.
+    /foo/bar would match /foo/barbaz and silently pace the wrong tree. A rule
+    on the filesystem root is a legitimate catch-all and matches everything
+    below it.
     """
     target = norm_path(path)
     best = None
     for raw_key in pol.get("paths", {}):
         key = norm_path(raw_key)
-        if target == key or target.startswith(key + os.sep):
+        if path_within(target, key):
             if best is None or len(key) > len(best[0]):
                 best = (key, raw_key)
     if best is None:

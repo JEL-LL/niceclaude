@@ -138,3 +138,22 @@ def norm_path(p):
     separators without mangling a bare root or a drive root.
     """
     return os.path.normcase(os.path.normpath(os.path.realpath(os.path.expanduser(p))))
+
+
+def path_within(cwd, key):
+    """Is `cwd` at or below policy key `key`? Both must already be norm_path'd.
+
+    Component-wise, not raw string prefix: /foo/bar must not match a rule on
+    /foo/ba, which would silently pace the wrong tree.
+
+    A root key is the one normalized path that already ends in a separator
+    ("/" on POSIX, "C:\\" on Windows -- normpath preserves those). Appending
+    another separator unconditionally would build "//" and match nothing
+    beneath it, which is what used to make a rule on the root apply to the root
+    directory alone. Both resolvers share this helper so `status` cannot
+    disagree with the hook about which rule governs a folder.
+    """
+    if cwd == key:
+        return True
+    prefix = key if key.endswith(os.sep) else key + os.sep
+    return cwd.startswith(prefix)
