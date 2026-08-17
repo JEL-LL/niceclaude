@@ -6,7 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = []
+# Windows ships no tz database, so zoneinfo cannot resolve the IANA zone names
+# `/usage` prints and the reset time would have to be inferred as machine-local.
+# That inference can fail OPEN -- the one direction this tool must not fail in --
+# so it is bought out with one small pure-data package. Linux and macOS use the
+# system database and stay dependency-free. The hook never touches timezones at
+# all; it reads a precomputed epoch, so the hot path is unaffected either way.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]

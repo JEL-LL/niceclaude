@@ -128,11 +128,16 @@ def resolve_tz(label):
     beside it is local, not UTC.
 
     zoneinfo resolves IANA names wherever a tz database exists, which covers
-    Linux and macOS. Windows ships none: `available_timezones()` is empty and
-    ZoneInfo() raises ZoneInfoNotFoundError unless the `tzdata` package is
-    installed. This project is deliberately dependency-free, so None is
-    returned there and the caller reads the time as local -- which is what the
-    label says it is.
+    Linux and macOS. Windows ships none, so `tzdata` is declared as a dependency
+    there (see pyproject.toml) and resolution works on every platform.
+
+    The None fallback below is therefore not the normal path any more, only a
+    backstop for an installation missing tzdata (`--no-deps`, a vendored copy).
+    It reads the time as machine-local, which is right if the renderer prints
+    the machine's own zone -- an inference that held on both machines observed,
+    but is not a documented contract. That inference is exactly what declaring
+    tzdata buys out, because when it is wrong the error is a whole UTC offset
+    and its direction depends on the sign.
     """
     if not label:
         return None

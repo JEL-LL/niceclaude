@@ -430,3 +430,39 @@ Two deliberate choices:
 
 `niceclaude status` prints the enforced set and marks the others `ignored`, so
 the display can never disagree with the hook about what is being enforced.
+
+---
+
+## 18. `tzdata` on Windows, to buy out an inference that could fail open
+
+`/usage` prints reset times in the zone named beside them, and on an ordinary
+workstation that is an IANA name like `America/New_York`. Reading them as UTC
+placed every reset four hours early on such a machine, which inflates the
+elapsed fraction, which raises the pace line, which permits spending that should
+have braked. Fail-open — see `windows-results.md` for the measurement.
+
+Fixing the parse required resolving the zone, and there `zoneinfo` splits by
+platform: Linux and macOS have a system tz database, **Windows ships none**.
+Without one, `ZoneInfo("America/New_York")` raises and the only remaining option
+is to read the time as machine-local.
+
+That fallback is correct **if** the renderer prints the machine's own zone. Two
+machines agreed and it is the obvious implementation, but it is not a documented
+contract, and when such an inference is wrong the error is a whole UTC offset
+whose direction depends on the sign — so it can land fail-open.
+
+**`tzdata` is declared as a Windows-only dependency to remove the inference.**
+Verified: with no system database `ZoneInfo` raises `ZoneInfoNotFoundError`;
+with `tzdata` present it resolves.
+
+The cost is bounded precisely:
+
+- The marker `sys_platform == 'win32'` keeps Linux and macOS dependency-free.
+- `tzdata` is pure data, no code, maintained by the Python core team.
+- **The hot path is untouched.** The hook never parses a timezone; it reads the
+  epoch the daemon already computed, so it remains stdlib-only everywhere.
+
+"Zero dependencies" was a nice property, but it is not worth holding an
+unverified assumption on the one axis where being wrong permits overspending.
+The local-time fallback is retained as a backstop for installations that skip
+dependencies, and is documented as such rather than as the intended path.

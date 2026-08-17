@@ -42,8 +42,15 @@ niceclaude watch                       # the poller (run it under systemd, a
 claude --settings <path printed by install> ...
 ```
 
-Pure Python, standard library only. No `jq`, no shell dependency, so it runs the
-same on Linux, macOS and Windows.
+Pure Python. No `jq`, no shell dependency, so it runs the same on Linux, macOS
+and Windows.
+
+Dependency-free on Linux and macOS. On Windows it declares `tzdata`, because
+Windows ships no timezone database and `/usage` prints IANA zone names — without
+it the reset time has to be inferred as machine-local, and when that inference
+is wrong the error is a whole UTC offset in a direction that can permit
+overspending. The hook itself never touches timezones (it reads a precomputed
+epoch), so the hot path is stdlib-only on every platform.
 
 The hook is a separate entry point (`niceclaude-hook`) targeting a module that
 imports only `json`, `os`, `sys` and `time`. That is not fussiness: it runs on
