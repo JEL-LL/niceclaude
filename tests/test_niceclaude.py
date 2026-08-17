@@ -27,7 +27,7 @@ def epoch(*args):
 
 def test_normal_session_line():
     buckets, unparsed, info = cli.parse_usage(
-        "Current session: 11% used · resets Aug 14, 8:10pm (UTC)", NOW)
+        "Current session: 11% used \u00b7 resets Aug 14, 8:10pm (UTC)", NOW)
     assert unparsed == []
     assert list(buckets) == ["session"]
     b = buckets["session"]
@@ -55,7 +55,7 @@ def test_missing_reset_clause_is_not_an_anomaly():
 
 ADVISORY_LINES = [
     "What's contributing to your limits usage?",
-    "Last 24h · 48 requests · 5 sessions",
+    "Last 24h \u00b7 48 requests \u00b7 5 sessions",
     "Top subagents: general-purpose 3%",
     # Mentions "rate limits", which must not trip the SUSPICIOUS check or an
     # account on overage billing reports a false anomaly continuously.
@@ -77,11 +77,11 @@ def test_advisory_block_alongside_buckets():
     raw = (
         "You are currently using your overages, which are billed separately "
         "from your subscription's rate limits.\n"
-        "Current session: 11% used · resets Aug 14, 8:10pm (UTC)\n"
-        "Current week (all models): 14% used · resets Aug 16, 12am (UTC)\n"
+        "Current session: 11% used \u00b7 resets Aug 14, 8:10pm (UTC)\n"
+        "Current week (all models): 14% used \u00b7 resets Aug 16, 12am (UTC)\n"
         "\n"
         "What's contributing to your limits usage?\n"
-        "Last 24h · 48 requests · 5 sessions\n"
+        "Last 24h \u00b7 48 requests \u00b7 5 sessions\n"
         "Top subagents: general-purpose 3%\n"
     )
     buckets, unparsed, info = cli.parse_usage(raw, NOW)
@@ -93,11 +93,11 @@ def test_advisory_block_alongside_buckets():
 
 @pytest.mark.parametrize("line,key,label,pct", [
     ("Current week (Sonnet only): 47% used", "week:Sonnet only", "Sonnet only", 47.0),
-    ("Current week (Fable): 3% used · resets Aug 16, 12am (UTC)",
+    ("Current week (Fable): 3% used \u00b7 resets Aug 16, 12am (UTC)",
      "week:Fable", "Fable", 3.0),
-    ("Current week (all models): 100% used · resets Aug 16, 12am (UTC)",
+    ("Current week (all models): 100% used \u00b7 resets Aug 16, 12am (UTC)",
      "week:all models", "all models", 100.0),
-    ("Current session: 100% used · resets Aug 14, 8:10pm (UTC)",
+    ("Current session: 100% used \u00b7 resets Aug 14, 8:10pm (UTC)",
      "session", None, 100.0),
 ])
 def test_labelled_and_saturated_buckets(line, key, label, pct):

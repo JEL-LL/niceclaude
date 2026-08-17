@@ -8,8 +8,8 @@ matters -- a folder that looks paced while nothing is governing it.
      Claude Code runs hook commands through Git Bash, where backslash is an
      escape character, so the path was mangled and the hook never ran.
   2. `/usage` was decoded with the locale encoding rather than UTF-8, so the
-     U+00B7 separator arrived as "Â·" and the two most important buckets
-     stopped parsing.
+     U+00B7 separator arrived double-encoded and the two most important
+     buckets stopped parsing.
   3. The reset clause was stamped UTC regardless of the zone printed beside it.
      Correct only on a machine set to UTC; four hours wrong on a workstation,
      in the fail-open direction.

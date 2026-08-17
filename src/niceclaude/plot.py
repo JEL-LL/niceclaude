@@ -180,7 +180,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
         pct_over = 100.0 * over_count / total if total else 0.0
         share_idle = 100.0 * idle / (idle + total) if (idle + total) else 0.0
         chrome(ax, f"{key}    —    {pct_over:.1f}% of live samples above the line"
-                   f"    ·    {share_idle:.0f}% of the log had no window running")
+                   f"    \u00b7    {share_idle:.0f}% of the log had no window running")
 
     for a in axes[:-1]:          # shared x: only the bottom time panel is labelled
         a.tick_params(labelbottom=False)

@@ -59,6 +59,15 @@ from ._shared import (  # noqa: E402
 # emits the bucket with no reset time at all. Requiring it turned a perfectly
 # healthy 0%-used window into an unparsed line.
 # Separator is U+00B7; tolerate ASCII variants in case the rendering changes.
+#
+# In the pattern below that separator is written as a regex escape, NOT as the
+# character itself, and must stay that way. A literal is a live hazard here:
+# anything that reads this file as cp1252 and writes it back as UTF-8 -- a
+# PowerShell `Get-Content | Set-Content` round-trip does exactly that --
+# double-encodes it silently, and the pattern then stops matching real
+# `/usage` output in precisely the way the encoding bug already did once.
+# The escape keeps the pattern pure ASCII, so no such round-trip can touch it.
+# tests/test_source_encoding.py enforces this.
 LINE_RE = re.compile(
     r"^Current\s+(?P<window>session|week)"
     r"(?:\s*\((?P<label>[^)]*)\))?"
@@ -70,7 +79,7 @@ LINE_RE = re.compile(
     # group, and so failed the whole line -- losing the session and
     # week:all-models buckets entirely. Accept anything up to the closing
     # paren, the same way the bucket label above already does.
-    r"(?:\s*[·*|-]\s*resets\s+(?P<resets>.+?)"
+    r"(?:\s*[\u00b7*|-]\s*resets\s+(?P<resets>.+?)"
     r"\s*\((?P<tz>[^)]+)\))?"
     r"\s*$",
     re.IGNORECASE,

@@ -26,7 +26,7 @@ def log(tmp_path, monkeypatch):
                 fh.write(json.dumps({
                     "ts": "x", "ts_epoch": now - (n - i) * interval_seconds,
                     "exit_code": 0, "elapsed_ms": 1, "stderr": None,
-                    "raw": f"Current session: {i}% used · resets {reset} (UTC)\n",
+                    "raw": f"Current session: {i}% used \u00b7 resets {reset} (UTC)\n",
                     "buckets": {}, "unparsed_lines": [],
                 }) + "\n")
         monkeypatch.setattr(cli, "LOG_PATH", str(path))

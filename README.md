@@ -171,7 +171,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-96 tests, no network, no tokens, under a second. One of them is skipped on
+100 tests, no network, no tokens, under a second. One of them is skipped on
 Windows, which ships no timezone database. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
@@ -242,6 +242,15 @@ Three bugs surfaced on that first run, all now fixed:
 Two things to know rather than fix: the hook costs ~100ms per call there against
 ~20ms on Linux (half of it the console-script launcher), and `niceclaude stop`
 leaves a stale `daemon.pid`, because `taskkill /F` cannot run the cleanup handler.
+
+**Source convention.** U+00B7 is written as the escape `\u00b7` in code, never
+as the literal character, so every Python file stays pure ASCII. This is not
+fussiness either: a PowerShell `Get-Content | Set-Content` round-trip decodes
+as cp1252 and re-encodes as UTF-8, which double-encodes the separator *inside
+`LINE_RE`* and breaks parsing in exactly the way the bug above did — silently,
+because the file still imports and still looks correct in a terminal. Only
+`git diff` shows it. `tests/test_source_encoding.py` enforces the convention.
+Comments keep the literal, where readability wins and corruption is harmless.
 
 ## Releasing
 

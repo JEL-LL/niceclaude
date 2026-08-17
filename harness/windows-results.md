@@ -11,7 +11,9 @@ command was made shell-safe, because Claude Code runs hook commands through Git
 Bash, where the backslashes in a Windows path are escape characters.
 
 All three are fixed in this commit, with regression tests. Test suite is now
-**96 tests** (was 86): 95 passed + 1 skipped on Windows, 96 passed on Linux.
+**100 tests** (was 86): 99 passed + 1 skipped on Windows, 100 passed on Linux.
+Four of the new tests guard the source-encoding convention described at the end
+of this file.
 (The checks below were run against the 80-test tree this session started on;
 the baseline moved to 86 upstream while the work was in progress.)
 
