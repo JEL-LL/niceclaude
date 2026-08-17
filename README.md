@@ -189,3 +189,7 @@ it on Windows, confirm:
 `harness/` carries the design record — the control law and why it has that
 shape, the measured platform behaviour behind each decision, what remains
 unverified, and a token-free test matrix. Start with `harness/README.md`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
