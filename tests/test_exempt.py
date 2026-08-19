@@ -13,19 +13,31 @@ obligations:
 
 import io
 import json
+import os
+import tempfile
 
 import pytest
 
 from niceclaude import cli, hook
+from niceclaude._shared import norm_path
 
-
-PAYLOAD = json.dumps({"cwd": "/tmp/nc-exempt-test",
-                      "hook_event_name": "PreToolUse"})
+CWD = os.path.join(tempfile.gettempdir(), "nc-exempt-test")
+PAYLOAD = json.dumps({"cwd": CWD, "hook_event_name": "PreToolUse"})
 
 
 @pytest.fixture
 def paced_everything(tmp_path, monkeypatch):
-    """A policy that would brake anything, so a pass-through proves an exemption."""
+    """A policy file that exists and paces everything.
+
+    Both halves matter. `main()` returns early when POLICY_PATH is absent, so
+    without a real file these tests would pass for the wrong reason. And the
+    rule paces the payload's cwd, so nothing here can be mistaken for a
+    not-paced short-circuit.
+
+    These tests stub `hook.run`, so they assert dispatch, not sleeping. That the
+    exemption beats an *actually braking* policy is asserted end to end in
+    tests/smoke_installed.py, where a real brake can be observed.
+    """
     policy = tmp_path / "policy.json"
     policy.write_text(json.dumps({
         "global": {"enabled": True},
@@ -63,7 +75,10 @@ def test_empty_value_does_not_exempt(paced_everything, monkeypatch):
 
     monkeypatch.setattr(hook, "run", fake_run)
     assert hook.main() == 0
-    assert seen == [("/tmp/nc-exempt-test", "PreToolUse")]
+    # Compared against norm_path rather than the literal payload: main()
+    # normalizes the cwd before dispatching, and on macOS /tmp really is
+    # /private/tmp while on Windows the same string acquires a drive letter.
+    assert seen == [(norm_path(CWD), "PreToolUse")]
 
 
 def test_the_exemption_still_drains_stdin(paced_everything, monkeypatch):
