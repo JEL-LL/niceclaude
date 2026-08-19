@@ -41,12 +41,49 @@ uv tool install "niceclaude[plot] @ git+https://github.com/JEL-LL/niceclaude"
 ```
 
 Drop `[plot]` if you would rather not pull in matplotlib; everything except
-`niceclaude plot` works without it. Append a ref to pin:
-`...@v0.1.0` for a tag, or a commit SHA.
+`niceclaude plot` works without it.
 
-Note that `uv tool upgrade niceclaude` reports *"Nothing to upgrade"* for a git
-install — it will not re-pull. To pick up new commits, run the install command
-again with `--force`.
+### Updating a git install
+
+`uv tool upgrade niceclaude` does **not** work here. It compares against an
+index, finds no newer *version*, and reports *"Nothing to upgrade"* — the version
+string in `pyproject.toml` has not moved, so from uv's point of view nothing has.
+It never re-pulls the ref. The upgrade appears to succeed and you keep running
+the old commit, which is a worse outcome than an error.
+
+Re-run the install instead, with `--force`:
+
+```bash
+uv tool install --force "niceclaude[plot] @ git+https://github.com/JEL-LL/niceclaude"
+niceclaude stop && niceclaude watch &   # the daemon holds the old code in memory
+niceclaude install                      # idempotent; only writes if something changed
+```
+
+All three matter:
+
+- `--force` is what makes uv discard the cached checkout and re-clone the ref.
+- The **daemon is a long-lived process**, so it keeps running the old module until
+  restarted. The hook is fine without this — it is a fresh process per tool call,
+  so it picks up new code immediately.
+- `niceclaude install` re-registers in case the hook path moved (a rebuilt tool
+  venv can land elsewhere). It updates in place rather than adding a second
+  registration, and prints `(already registered)` when there was nothing to do.
+
+Verifying you actually moved is the awkward part, because `uv tool list` prints
+the version from `pyproject.toml` — which is exactly the string that does not
+change between commits. The revision uv resolved is recorded here:
+
+```bash
+grep -o 'rev = "[^"]*"' "$(uv tool dir)/niceclaude/uv-receipt.toml"
+```
+
+Pin a ref by appending it — `...@v0.1.0` for a tag, `...@<sha>` for a commit.
+A `--force` reinstall is then the only thing that moves you off it, which is the
+point of pinning.
+
+If your install came from a local clone rather than the URL (the receipt says
+`directory = ...` instead of a git ref), the equivalent is
+`uv tool install --force ".[plot]"` from inside that clone after a `git pull`.
 
 To hack on it, install from a clone instead:
 
@@ -58,12 +95,34 @@ uv tool install --editable ".[plot]"   # source edits take effect with no reinst
 Then wire it up:
 
 ```bash
-niceclaude install                     # writes a settings fragment pointing at the hook
+niceclaude install                     # registers the hook in ~/.claude/settings.json
 niceclaude on ~/projects/nightly --model opus
 niceclaude watch                       # the poller (run it under systemd, a
                                        # container entrypoint, or just &)
-claude --settings <path printed by install> ...
 ```
+
+That is the whole setup. `claude` is then launched normally, from anywhere — the
+hook is registered once and every session consults the policy, so turning pacing
+on or off is only ever `niceclaude on` / `niceclaude off`. Folders with no
+matching rule are untouched: the hook answers *"is this folder paced?"* from
+`policy.json` alone, with no snapshot read, no subprocess and no network, so it
+is a genuine no-op there (~20ms).
+
+`install` **merges** into `~/.claude/settings.json` rather than writing it. Your
+`model`, `permissions`, and your own hooks — including other hooks on the same
+two events — all survive, and a file it cannot parse is refused rather than
+overwritten. Running it twice updates in place instead of registering the hook
+twice. `niceclaude uninstall` removes exactly what it added and leaves policy and
+logs alone.
+
+To exempt a single session, set `NICECLAUDE_OFF` to any non-empty value:
+
+```bash
+NICECLAUDE_OFF=1 claude          # this session is not paced, wherever it runs
+```
+
+That is the one exemption settings files cannot express, and the reason a global
+install is safe — see below.
 
 Pure Python. No `jq`, no shell dependency, so it runs the same on Linux, macOS
 and Windows.
@@ -83,13 +142,37 @@ Measured: 16ms for the minimal module, 29ms via the full CLI, and 16ms for the
 bash+jq implementation this replaced — the shell version was no faster, because
 it spawned `jq` two or three times per invocation.
 
-## Why a `--settings` fragment and not `~/.claude/settings.json`
+## Why the hook is installed globally, and how it is exempted
+
+This reverses an earlier decision, so both halves are worth stating.
 
 Hooks merge additively across settings scopes, and a narrower scope cannot
-un-register one defined in a broader scope. Installing globally would silently
-pace your foreground work with no way to exempt it. Passing `--settings` on the
-background invocation keeps foreground sessions entirely free of the hook —
-not disabled, absent.
+un-register one defined in a broader scope. So `install` originally wrote only a
+`--settings` fragment, on the reasoning that a global install could never be
+exempted, and would therefore silently pace foreground work.
+
+The constraint is real. The conclusion was not, for two reasons:
+
+- **The hook is already a no-op where no rule matches.** It resolves the folder
+  policy first, from `policy.json` alone. That ordering exists for a different
+  reason — getting it wrong made unpaced folders pay a ~2s `/usage` refresh per
+  tool call whenever the snapshot was stale — but it also means a global install
+  changes nothing outside the folders you explicitly named.
+- **The exemption does not have to live in settings.** `NICECLAUDE_OFF` is
+  per-*process*, which is strictly finer-grained than any settings file: it
+  exempts one session, in one shell, wherever that session runs. Settings scope
+  could never have expressed that.
+
+What the old shape bought in exchange was steep: `niceclaude on <folder>` looked
+like the whole interface but silently did nothing unless you also remembered to
+launch with `--settings`. A pacer that looks installed while doing nothing is the
+failure mode this tool works hardest to avoid everywhere else, and the install
+story was quietly committing it. `niceclaude status` now reports whether the hook
+is registered at all, so the two facts — *is this folder paced* and *is anything
+positioned to pace it* — can no longer be confused.
+
+The fragment is still written, and `claude --settings <fragment>` still works, for
+anyone who wants foreground sessions to be not merely exempt but hook-free.
 
 ## Policy
 
@@ -125,13 +208,10 @@ niceclaude on  ~ --model opus          # narrower catch-all: just your home dir
 Longest-prefix still decides, and the root is the shallowest rule there is, so
 every existing rule keeps overriding it and carve-outs work exactly as before.
 
-Even then, pacing only reaches sessions started with `--settings <fragment>`.
-That is deliberate, and the hook is not installed into `~/.claude/settings.json`
-to close the gap — see the section above.
-
-Two agents in the *same* folder necessarily share a policy. To run an unpaced
-supervisor alongside a paced worker, pace the **subdirectory** the worker runs
-in — longest-prefix only matches downward, so a parent stays untouched.
+Two agents in the *same* folder necessarily share a policy. Either pace the
+**subdirectory** the worker runs in — longest-prefix only matches downward, so a
+parent stays untouched — or start the supervisor with `NICECLAUDE_OFF=1`, which
+exempts that session without touching the policy at all.
 
 ## Pacing against only some windows
 
@@ -218,7 +298,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-110 tests, no network, no tokens, under a second. `tests/smoke_installed.py`
+145 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 

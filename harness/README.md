@@ -54,7 +54,8 @@ poll happens once a minute rather than once per tool call.
 <data>/policy.json     folder rules; re-read on every hook invocation
 <data>/hook.log        brake/release events — the only record of overnight behaviour
 <data>/daemon.pid      pidfile
-<config>/settings.json --settings fragment to pass to claude
+<config>/settings.json optional --settings fragment; `install` registers the
+                       hook in ~/.claude/settings.json (CLAUDE_CONFIG_DIR)
 ```
 
 `<data>` is `~/.local/share/niceclaude` on POSIX, `%LOCALAPPDATA%\niceclaude` on
@@ -65,13 +66,19 @@ Windows. Override with `NICECLAUDE_DIR`.
 Two things were changed outside the repo and should be known about before
 anything is trusted or torn down:
 
-1. **The hook is installed globally** in `~/.claude/settings.json`, so it
-   applies to every session on this machine rather than only ones launched with
-   `--settings`. This is safe because the default policy paces nothing — the
-   hook fires everywhere but does nothing unless a folder is explicitly paced.
-   The original file is backed up at `~/.claude/settings.json.bak-preniceclaude`.
-   To undo, restore that backup, or run `niceclaude global off` to neutralize
-   the hook without touching settings.
+1. **The hook is installed globally** in `~/.claude/settings.json`. This started
+   as an out-of-repo hand edit; `niceclaude install` now does it, so it is no
+   longer machine state that differs from a clean setup — see *Why the hook is
+   installed globally* in the top-level README for the reasoning, which is the
+   one that was written here first: safe because the default policy paces
+   nothing, so the hook fires everywhere and does nothing unless a folder is
+   explicitly paced.
+
+   The original file is still backed up at
+   `~/.claude/settings.json.bak-preniceclaude`, from the hand edit. To undo, run
+   `niceclaude uninstall` (which removes only our entries), or `niceclaude global
+   off` to neutralize the hook without touching settings, or `NICECLAUDE_OFF=1`
+   to exempt one session.
 2. **`/config/workspace/niceclaude` is a paced folder** (`m0=5`, `m1=8`,
    `--model opus`). `niceclaude list` shows every rule; `niceclaude off <dir>`
    removes one.

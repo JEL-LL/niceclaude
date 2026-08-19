@@ -45,8 +45,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ._shared import (  # noqa: E402
-    CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, LOG_PATH,
-    POLICY_PATH, SETTINGS_PATH,
+    CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, HOME,
+    LOG_PATH, POLICY_PATH, SETTINGS_PATH,
     MAX_STALE, STATE_PATH, WINDOW_SECONDS, model_matches, norm_path,
     normalize_enforce, path_within,
 )
@@ -474,9 +474,197 @@ def find_hook_exe():
     return None
 
 
-def cmd_install(force):
+def hook_command():
+    """The shell command string to register, or None if the hook is missing.
+
+    Hook commands are run through a shell, so a path containing spaces
+    (C:\\Users\\...\\Program Files\\...) has to be quoted or it parses as two
+    arguments and the hook silently never fires.
+
+    On Windows that shell is a POSIX one -- Claude Code runs hooks through Git
+    Bash, verified by a hook command of `echo x > /c/tmp/marker` landing at
+    C:\\tmp\\marker. There, backslash is an ESCAPE character, so a native path
+    like C:\\Users\\me\\.local\\bin\\niceclaude-hook.exe loses every separator
+    and becomes C:Usersme.localbinniceclaude-hook.exe, no such file exists, and
+    the hook never runs. Nothing reports this: the folder looks paced while
+    being completely ungoverned, the worst failure mode this tool has.
+
+    Forward slashes avoid the escaping entirely and are accepted by the Windows
+    API, so the command works whether the shell is sh or cmd.exe.
+    """
     hook_exe = find_hook_exe()
     if not hook_exe:
+        return None
+    if os.name == "nt":
+        hook_exe = hook_exe.replace("\\", "/")
+    return f'"{hook_exe}"' if " " in hook_exe else hook_exe
+
+
+def claude_settings_path():
+    """Claude Code's user settings file -- the file `install` writes into.
+
+    Honours CLAUDE_CONFIG_DIR, which is how Claude Code itself relocates the
+    directory. Resolved on each call rather than at import, because the test
+    suite must be able to redirect it and because a daemon outliving an
+    environment change should not keep writing to a stale path.
+    """
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+    return os.path.join(base, "settings.json")
+
+
+def is_our_hook(entry):
+    """Is this hook entry one of ours?
+
+    Matched on the executable's basename rather than the full command, so a
+    reinstall after the tool venv moves *updates* the existing entry instead of
+    appending a second one. Two registrations would double the per-call latency;
+    worse, after a path change one of them is dead and the file looks correct.
+    """
+    if not isinstance(entry, dict):
+        return False
+    cmd = entry.get("command")
+    if not isinstance(cmd, str):
+        return False
+    return os.path.basename(cmd.strip().strip('"')).startswith("niceclaude-hook")
+
+
+def load_settings(path):
+    """Read a settings file for editing. Returns (dict, error-message).
+
+    A file we cannot parse is never overwritten -- it is someone's real
+    configuration, and clobbering `model`, `permissions` or their own hooks to
+    install ours would be a far worse bug than refusing to install.
+    """
+    if not os.path.exists(path):
+        return {}, None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return None, f"could not read {path}: {exc}"
+    if not isinstance(cfg, dict):
+        return None, f"{path} does not contain a JSON object"
+    return cfg, None
+
+
+def splice_hook(cfg, command):
+    """Register `command` on every hook event in `cfg`, in place.
+
+    Creates only the structure that is missing and touches only the keys it
+    owns: other top-level settings, other events, other people's hooks on the
+    same event, and a matcher the user has deliberately narrowed all survive.
+
+    Returns (changed, error-message).
+    """
+    hooks = cfg.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False, 'the "hooks" key is not an object'
+
+    changed = False
+    for event in HOOK_EVENTS:
+        groups = hooks.setdefault(event, [])
+        if not isinstance(groups, list):
+            return False, f'hooks.{event} is not an array'
+
+        existing = None
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for entry in group.get("hooks") or []:
+                if is_our_hook(entry):
+                    existing = entry
+                    break
+            if existing:
+                break
+
+        if existing is None:
+            groups.append({"matcher": "*", "hooks": [
+                {"type": "command", "command": command, "timeout": 21600}]})
+            changed = True
+        elif existing.get("command") != command:
+            existing["command"] = command
+            existing["timeout"] = 21600
+            changed = True
+
+    return changed, None
+
+
+def unsplice_hook(cfg):
+    """Remove our hook entries from `cfg`, in place. Returns True if changed.
+
+    Prunes the containers it empties: a matcher group with no hooks left, an
+    event with no groups left, and `hooks` itself. It cannot tell a container it
+    emptied from one that was already empty, so pruning is decided on emptiness
+    -- but only for events we actually removed from, so an empty event the user
+    put there themselves survives. Nothing is lost either way: an empty hook
+    list and an absent key mean the same thing to Claude Code.
+    """
+    hooks = cfg.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+
+    changed = False
+    for event in list(hooks):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        removed_here = False
+        for group in list(groups):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            kept = [e for e in group["hooks"] if not is_our_hook(e)]
+            if len(kept) == len(group["hooks"]):
+                continue
+            removed_here = changed = True
+            if kept:
+                group["hooks"] = kept
+            else:
+                groups.remove(group)
+        # Only prune what we emptied. Tracked per event, not with `changed`:
+        # an event the user left as an empty list must survive a removal that
+        # happened under some *other* event.
+        if removed_here and not groups:
+            del hooks[event]
+    if changed and not hooks:
+        del cfg["hooks"]
+    return changed
+
+
+def registered_in(path):
+    """Whether our hook is registered in `path`, for reporting."""
+    cfg, err = load_settings(path)
+    if err or not cfg:
+        return False
+    hooks = cfg.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    return any(is_our_hook(entry)
+               for groups in hooks.values() if isinstance(groups, list)
+               for group in groups if isinstance(group, dict)
+               for entry in (group.get("hooks") or []))
+
+
+def cmd_install(force):
+    """Register the hook in Claude Code's user settings.
+
+    This writes into ~/.claude/settings.json, so `niceclaude on <folder>` is all
+    it takes afterwards -- no special launch. That is a reversal of the original
+    design, which wrote only a --settings fragment on the grounds that hooks
+    merge additively across scopes and a narrower scope cannot un-register a
+    broader one, so a global install could not be exempted.
+
+    The constraint is real; the conclusion was not. The hook already answers
+    "is this folder paced?" from policy.json alone -- no snapshot, no
+    subprocess -- so it is a genuine no-op everywhere no rule matches. And the
+    one gap settings scope cannot close (two sessions in the *same* folder, one
+    paced and one not) is closed by NICECLAUDE_OFF instead, which is per-process
+    and therefore finer-grained than any settings file.
+
+    The fragment is still written, for anyone who wants foreground sessions to
+    be not merely exempt but hook-free.
+    """
+    command = hook_command()
+    if not command:
         print("error: could not find the niceclaude-hook executable. Install the "
               "package first (uv tool install niceclaude).", file=sys.stderr)
         return 1
@@ -487,42 +675,68 @@ def cmd_install(force):
     if not os.path.exists(POLICY_PATH) or force:
         save_policy(json.loads(json.dumps(DEFAULT_POLICY)))
 
-    # Hook commands are run through a shell, so a path containing spaces
-    # (C:\Users\...\Program Files\...) has to be quoted or it parses as two
-    # arguments and the hook silently never fires.
-    #
-    # On Windows that shell is a POSIX one -- Claude Code runs hooks through Git
-    # Bash, verified by a hook command of `echo x > /c/tmp/marker` landing at
-    # C:\tmp\marker. There, backslash is an ESCAPE character, so a native path
-    # like C:\Users\me\.local\bin\niceclaude-hook.exe loses every separator and
-    # becomes C:Usersme.localbinniceclaude-hook.exe, no such file exists, and
-    # the hook never runs. Nothing reports this: the folder looks paced while
-    # being completely ungoverned, the worst failure mode this tool has.
-    #
-    # Forward slashes avoid the escaping entirely and are accepted by the
-    # Windows API, so the command works whether the shell is sh or cmd.exe.
-    if os.name == "nt":
-        hook_exe = hook_exe.replace("\\", "/")
-    command = f'"{hook_exe}"' if " " in hook_exe else hook_exe
-
-    # A --settings fragment, NOT ~/.claude/settings.json. Hooks merge additively
-    # across scopes and a narrower scope cannot un-register a broader one, so a
-    # global install would silently pace foreground work too, with no way to
-    # exempt it.
-    settings = {"hooks": {
+    fragment = {"hooks": {
         ev: [{"matcher": "*", "hooks": [
             {"type": "command", "command": command, "timeout": 21600}]}]
         for ev in HOOK_EVENTS
     }}
-    write_atomic(SETTINGS_PATH, json.dumps(settings, indent=2))
+    write_atomic(SETTINGS_PATH, json.dumps(fragment, indent=2))
+
+    target = claude_settings_path()
+    cfg, err = load_settings(target)
+    if err:
+        print(f"error: {err}\n"
+              f"       Refusing to overwrite it. Fix or move the file and rerun,\n"
+              f"       or launch with: claude --settings {SETTINGS_PATH}",
+              file=sys.stderr)
+        return 1
+
+    changed, err = splice_hook(cfg, command)
+    if err:
+        print(f"error: {target}: {err}\n"
+              f"       Refusing to rewrite a shape we do not understand.",
+              file=sys.stderr)
+        return 1
+    if changed:
+        write_atomic(target, json.dumps(cfg, indent=2) + "\n")
 
     print(f"hook:     {command}")
-    print(f"settings: {SETTINGS_PATH}")
+    print(f"settings: {target}"
+          f"{'' if changed else '  (already registered)'}")
+    print(f"fragment: {SETTINGS_PATH}  (optional, for --settings)")
     print(f"policy:   {POLICY_PATH}")
     print("\nnext:")
     print("  niceclaude on <folder> --model opus")
     print("  niceclaude watch")
-    print(f"  claude --settings {SETTINGS_PATH} ...")
+    print("\nEvery session now consults the policy; folders with no rule are\n"
+          "untouched. NICECLAUDE_OFF=1 exempts a single session.")
+    return 0
+
+
+def cmd_uninstall():
+    """Un-register the hook, leaving everything else in the file intact.
+
+    The counterpart to a merging install: once `install` edits a file it does
+    not own, there has to be a way back out that does not involve hand-editing
+    JSON. Policy and logs are left alone -- this stops pacing, it does not
+    forget your configuration.
+    """
+    target = claude_settings_path()
+    cfg, err = load_settings(target)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if unsplice_hook(cfg):
+        write_atomic(target, json.dumps(cfg, indent=2) + "\n")
+        print(f"removed the hook from {target}")
+    else:
+        print(f"no niceclaude hook registered in {target}")
+
+    if os.path.exists(SETTINGS_PATH):
+        os.remove(SETTINGS_PATH)
+        print(f"removed the fragment {SETTINGS_PATH}")
+    print(f"policy and logs left alone ({DATA_DIR})")
     return 0
 
 
@@ -674,12 +888,34 @@ def cmd_global(enabled):
     return 0
 
 
+def describe_installation():
+    """One line on whether anything is actually positioned to pace this folder.
+
+    `status` printing `paced True` while no hook is registered anywhere is the
+    exact failure this tool most needs to never commit: the folder looks
+    governed and every tool call sails through. Policy and plumbing are separate
+    facts, so status reports both.
+    """
+    if os.environ.get("NICECLAUDE_OFF"):
+        return ("EXEMPT -- NICECLAUDE_OFF is set in this shell, so a session\n"
+                "                started from here is not paced at all")
+    target = claude_settings_path()
+    if registered_in(target):
+        return f"registered in {target}"
+    if registered_in(SETTINGS_PATH):
+        return (f"fragment only -- reaches only sessions started with\n"
+                f"                --settings {SETTINGS_PATH}\n"
+                f"                Run `niceclaude install` to pace every session.")
+    return ("NOT REGISTERED -- nothing is pacing anything. Run: niceclaude install")
+
+
 def cmd_status(path):
     pol = load_policy()
     key = norm_path(path)
     matched, entry = resolve(pol, key)
     genabled = pol.get("global", {}).get("enabled", True)
     print(f"folder:         {key}")
+    print(f"hook:           {describe_installation()}")
     print(f"global.enabled: {genabled}")
     if matched is None:
         print("matched rule:   <none>  -> NOT paced")
@@ -852,8 +1088,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("install", help="write the hook and settings fragment")
+    i = sub.add_parser("install", help="register the hook in Claude Code's settings")
     i.add_argument("--force", action="store_true", help="reset policy.json too")
+    sub.add_parser("uninstall", help="un-register the hook, keeping policy and logs")
     w = sub.add_parser("watch", help="poll usage forever (the daemon)")
     w.add_argument("--interval", type=int, default=60)
     sub.add_parser("sample", help="one poll, printed and logged")
@@ -885,6 +1122,8 @@ def main():
     a = ap.parse_args()
     if a.cmd == "install":
         return cmd_install(a.force)
+    if a.cmd == "uninstall":
+        return cmd_uninstall()
     if a.cmd == "watch":
         return cmd_watch(a.interval)
     if a.cmd == "sample":

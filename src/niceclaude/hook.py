@@ -293,6 +293,22 @@ def main():
         raw = sys.stdin.read()
     except Exception:
         return 0
+
+    # Per-session escape hatch, and the reason the hook can be installed into
+    # ~/.claude/settings.json at all. Hooks merge additively across settings
+    # scopes and a narrower scope cannot un-register a broader one, so settings
+    # alone cannot exempt one session -- but an environment variable is
+    # per-process, which is finer-grained than any settings file. It is what
+    # lets an unpaced supervisor run in the same folder as a paced worker.
+    #
+    # Any non-empty value exempts: NICECLAUDE_OFF=0 meaning "on" would be a
+    # trap, and this is the one setting whose whole job is to be unmistakable.
+    #
+    # Checked after the stdin read rather than before it, so the caller's write
+    # always lands somewhere and cannot fail on a closed pipe.
+    if os.environ.get("NICECLAUDE_OFF"):
+        return 0
+
     try:
         payload = json.loads(raw) if raw.strip() else {}
     except ValueError:

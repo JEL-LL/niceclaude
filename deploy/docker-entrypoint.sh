@@ -4,7 +4,11 @@
 #
 #   COPY deploy/docker-entrypoint.sh /usr/local/bin/
 #   ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-#   CMD ["claude", "--settings", "/root/.config/niceclaude/settings.json", "..."]
+#   CMD ["claude", "..."]
+#
+# `niceclaude install` registers the hook in ~/.claude/settings.json, so the
+# command needs no --settings. Pass --settings <config>/settings.json instead if
+# you want only this invocation hooked and nothing else in the image.
 #
 # POSIX sh only -- no bashisms, so it runs under dash/busybox ash.
 

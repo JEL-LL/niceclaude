@@ -187,16 +187,58 @@ is a real complexity increase and folder-keying has covered every case so far.
 
 ---
 
-## 8. Install as a `--settings` fragment, never globally
+## 8. Install globally; exempt with an environment variable, not a settings scope
+
+**Reversed.** This decision originally read *"install as a `--settings`
+fragment, never globally"*, and the reasoning below is why — followed by why it
+was wrong.
 
 Hook settings merge **additively** across scopes (enterprise → user → project →
 local → `--settings`), and **a narrower scope cannot un-register a hook defined
-in a broader one.**
+in a broader one.** So the conclusion drawn was that installing into
+`~/.claude/settings.json` would pace foreground work with no way to exempt it.
+`niceclaude install` wrote a standalone fragment, and only background invocations
+passed `--settings <that file>`; foreground sessions didn't have the hook
+disabled, they didn't have it at all.
 
-So installing into `~/.claude/settings.json` would pace foreground work with no
-way to exempt it. Instead `niceclaude install` writes a standalone fragment, and
-only background invocations pass `--settings <that file>`. Foreground sessions
-don't have the hook disabled — they don't have it at all.
+The premise about settings scopes is correct and still is. Two things make the
+conclusion not follow:
+
+1. **The exemption need not be a settings scope.** `NICECLAUDE_OFF` is
+   per-process. That is *finer*-grained than any settings file can be: it
+   exempts one session in one shell, which is precisely the case this decision
+   originally called impossible. It is also what lets an unpaced supervisor share
+   a folder with a paced worker — a job decision 7's longest-prefix matching
+   previously had to carry alone, via a subdirectory rule.
+2. **A global hook is already inert where no rule matches.** `paced_entry()`
+   resolves policy before touching the snapshot — added for a different reason
+   (getting the order backwards made unpaced folders pay a ~2s refresh per call
+   whenever the snapshot was stale), but it means the blast radius of a global
+   install is exactly the set of folders named in `policy.json`.
+
+What tipped it was the cost on the other side. `niceclaude on <folder>` reads as
+the entire interface, and under the fragment-only design it silently did nothing
+unless you also remembered `--settings` on every launch. That is the tool's own
+worst failure mode — *looks paced, isn't* — the one decision 11's fail-open-and-
+log rule and the Windows backslash fix (decision 7's closing note) both exist to
+keep out of the hot path. Shipping it in the install story was inconsistent.
+
+Consequences, all of which the merge has to earn:
+
+- `install` **merges** into a file it does not own, so it preserves unrelated
+  keys and other people's hooks, refuses a file it cannot parse rather than
+  overwriting it, and updates in place on reinstall rather than registering a
+  duplicate (two entries double per-call latency, and after the tool venv moves
+  one of them is dead while the file still looks right).
+- `uninstall` exists, because a merging install needs a way back out that is not
+  hand-editing JSON. `tests/test_install_merge.py` asserts the round trip
+  restores the original exactly, which is the only assertion strong enough to
+  catch an incidental mutation at depth.
+- `status` reports whether the hook is registered *at all*, so *is this folder
+  paced* and *is anything positioned to pace it* stop being confusable — the
+  confusion that prompted the reversal.
+- The fragment is still written. Someone who wants foreground sessions hook-free
+  rather than merely exempt loses nothing.
 
 ---
 
