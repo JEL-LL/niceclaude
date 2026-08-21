@@ -1,5 +1,13 @@
 [project]
 name = "niceclaude"
+# The only place the version is stored. `niceclaude version` reads it back from
+# the installed distribution's metadata rather than from a literal in the source,
+# so there is nothing here to drift out of agreement with.
+#
+# When you change this line, add a CHANGELOG.md entry in the same commit. The
+# release is a tag push and publish.yml refuses a tag that disagrees with this
+# number, so this line and the tag are checked against each other -- but nothing
+# checks that the release was ever described. That part is on you.
 version = "0.1.0"
 description = "Pace Claude Code background work against its own usage windows, so it yields budget to your foreground work"
 readme = "README.md"

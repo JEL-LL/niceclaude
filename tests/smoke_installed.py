@@ -76,6 +76,19 @@ def main():
     if not (nc and hook):
         return 1
 
+    # The version is read from distribution metadata rather than a literal in
+    # the source, so the lookup can only fail in a real install -- a tool venv
+    # where dist-info is not where importlib.metadata looks. That is precisely
+    # what this file, and nothing in the pytest suite, exercises.
+    sub = run([nc, "version"], env)
+    flag = run([nc, "--version"], env)
+    check("niceclaude version prints a version", sub.returncode == 0
+          and sub.stdout.startswith("niceclaude "),
+          sub.stdout.strip() or (sub.stderr or "").strip())
+    check("--version agrees with the subcommand",
+          flag.returncode == 0 and flag.stdout == sub.stdout,
+          f"{flag.stdout.strip()!r} vs {sub.stdout.strip()!r}")
+
     # Seed Claude Code's settings with something to protect, so the merge is
     # exercised against real files rather than into a vacuum.
     claude_settings = os.path.join(env["CLAUDE_CONFIG_DIR"], "settings.json")

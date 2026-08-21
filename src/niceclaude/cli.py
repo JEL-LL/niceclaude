@@ -1082,15 +1082,76 @@ def cmd_list():
     return 0
 
 
+def installed_version():
+    """The version of the installed niceclaude distribution, or None.
+
+    Read from distribution metadata rather than a literal in the source, so
+    pyproject.toml stays the only place the number is stored. Two copies of a
+    version cannot be kept in agreement by hand, and the one check that exists
+    -- publish.yml comparing the git tag against pyproject.toml -- would not
+    catch a second copy drifting.
+
+    importlib.metadata is imported inside the function, not at module scope.
+    The lookup walks sys.path for dist-info and measured ~200ms on Windows
+    here; every command loads this module and only this one needs the number.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("niceclaude")
+    except PackageNotFoundError:
+        return None
+
+
+def cmd_version():
+    """Print the installed version.
+
+    Reports what is *installed*, which is the question worth answering: a stale
+    build with a current checkout beside it is the failure this command exists
+    to make visible, and a number read out of the source tree could not tell
+    the two apart.
+
+    Exits nonzero when there is no installed distribution to ask -- a source
+    tree on sys.path with nothing installed, or an editable install that has
+    been removed. Printing a guess there would misreport exactly the situation
+    the command is for.
+    """
+    found = installed_version()
+    if found is None:
+        print("niceclaude: no installed distribution found -- running from a "
+              "source tree?", file=sys.stderr)
+        return 1
+    print(f"niceclaude {found}")
+    return 0
+
+
+class _VersionAction(argparse.Action):
+    """`--version`, without charging every other command for the lookup.
+
+    argparse's built-in "version" action wants the string when the parser is
+    built, so it would run installed_version() on every invocation. This defers
+    it to the one call that actually prints something.
+    """
+
+    def __init__(self, option_strings, dest, help=None):
+        super().__init__(option_strings, dest, nargs=0,
+                         default=argparse.SUPPRESS, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.exit(cmd_version())
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="niceclaude", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action=_VersionAction,
+                    help="print the installed version and exit")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     i = sub.add_parser("install", help="register the hook in Claude Code's settings")
     i.add_argument("--force", action="store_true", help="reset policy.json too")
     sub.add_parser("uninstall", help="un-register the hook, keeping policy and logs")
+    sub.add_parser("version", help="print the installed version")
     w = sub.add_parser("watch", help="poll usage forever (the daemon)")
     w.add_argument("--interval", type=int, default=60)
     sub.add_parser("sample", help="one poll, printed and logged")
@@ -1124,6 +1185,8 @@ def main():
         return cmd_install(a.force)
     if a.cmd == "uninstall":
         return cmd_uninstall()
+    if a.cmd == "version":
+        return cmd_version()
     if a.cmd == "watch":
         return cmd_watch(a.interval)
     if a.cmd == "sample":

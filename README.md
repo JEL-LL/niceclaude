@@ -59,6 +59,14 @@ niceclaude stop && niceclaude watch &   # the daemon holds the old code in memor
 niceclaude install                      # idempotent; only writes if something changed
 ```
 
+`niceclaude version` prints the installed version, read from the distribution's
+metadata rather than from a literal in the source, so it reports what is actually
+installed. Be aware of what it cannot tell you: for a git install the number does
+not move between commits either, so two builds many commits apart both report
+the same thing. To tell whether the *code* is current, check that a command you
+expect is present (`niceclaude --help`) and that the plumbing is in place
+(`niceclaude status .` distinguishes "registered" from "fragment only").
+
 All three matter:
 
 - `--force` is what makes uv discard the cached checkout and re-clone the ref.
@@ -298,7 +306,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-145 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
+153 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 
@@ -383,7 +391,8 @@ Comments keep the literal, where readability wins and corruption is harmless.
 See [RELEASING.md](RELEASING.md). Publishing is a tag push; the workflow builds,
 tests, validates metadata, and installs and smoke-tests the built wheel before
 anything reaches an index. Authentication is PyPI Trusted Publishing, so there
-is no API token anywhere.
+is no API token anywhere. [CHANGELOG.md](CHANGELOG.md) records what changed in
+each version; the version itself is stored only in `pyproject.toml`.
 
 ## Design notes
 

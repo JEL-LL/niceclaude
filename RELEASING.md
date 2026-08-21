@@ -74,7 +74,8 @@ will on the real index.
 ## Release
 
 ```bash
-# 1. bump the version in pyproject.toml, commit it
+# 1. bump the version in pyproject.toml and describe the release in
+#    CHANGELOG.md, in the same commit
 # 2. tag it — the workflow refuses to publish if these disagree
 git tag v0.1.0
 git push --tags
