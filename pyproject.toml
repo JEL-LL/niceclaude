@@ -8,7 +8,7 @@ name = "niceclaude"
 # release is a tag push and publish.yml refuses a tag that disagrees with this
 # number, so this line and the tag are checked against each other -- but nothing
 # checks that the release was ever described. That part is on you.
-version = "0.1.0"
+version = "0.2.0"
 description = "Pace Claude Code background work against its own usage windows, so it yields budget to your foreground work"
 readme = "README.md"
 requires-python = ">=3.11"

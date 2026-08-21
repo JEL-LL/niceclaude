@@ -15,6 +15,29 @@ refactors and internal cleanups do not need a line at all.
 
 Nothing yet.
 
+## 0.2.0 -- not released
+
+Neither 0.1.0 nor this has been published, so there is no upgrade path here to
+describe; the number moved so that a build can be told apart from the one before
+it, which `niceclaude version` could not do while it never changed.
+
+### Added
+
+- `niceclaude version` (and `--version`) prints the installed version, read from
+  the distribution's metadata. It reports what is *installed* rather than what a
+  source file claims. Note what it cannot do: for a git install the number does
+  not move between commits either, so `--help` and `status` remain the checks for
+  whether the code is current.
+- This file, and a comment on the version line in `pyproject.toml` asking for an
+  entry here whenever that line moves. A tag that disagrees with the declared
+  version is caught mechanically by `publish.yml`; an undescribed release is not.
+
+### Changed
+
+- The version is stored in exactly one place, `pyproject.toml`. The `__version__`
+  literal in `__init__.py` is gone: nothing read it, and nothing kept it in
+  agreement with the copy that `publish.yml` actually checks against the git tag.
+
 ## 0.1.0 -- not released
 
 No tag exists and nothing has been published to any index. Two gates stand in
@@ -56,8 +79,6 @@ default pace line rather than a forced one.
   mode. `list` shows every configured folder.
 - `burn` characterises burn rate and duty cycle; `plot` graphs utilisation
   against the pace line, under the optional `plot` extra.
-- `version` prints the installed version, read from distribution metadata so it
-  reports what is installed rather than what a source file claims.
 - Pure Python, and dependency-free on Linux and macOS. Windows declares `tzdata`,
   because it ships no tz database and the reset time would otherwise have to be
   inferred as machine-local -- an inference that can fail *open*, the one
