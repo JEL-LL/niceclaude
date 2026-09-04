@@ -13,7 +13,24 @@ refactors and internal cleanups do not need a line at all.
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- `niceclaude status` now answers "how long, and which line". Each usage bucket
+  gets the wait it would impose (`HOLDS 1h44m`), and the summary says what the
+  hook would decide right now: the reason, the release time, and the re-check
+  interval. A braked agent is otherwise indistinguishable from a hung one.
+- Every bucket is priced, including the ones the folder does not enforce, which
+  is what makes `--enforce` a decision you can check rather than guess at: the
+  weekly line rises at 0.60 %/h against the session line at 20 %/h, so an
+  `ignored` row reading in days is worth seeing.
+
+### Changed
+
+- The pace-line arithmetic moved to `_shared.bucket_pace`, and both the hook and
+  `status` now use it. `status` had its own copy, which was free to drift into
+  reporting numbers the hook did not brake on. The verdict line goes further and
+  calls `hook.decide` itself, so `status` cannot say `running` about a folder the
+  hook is holding.
 
 ## 0.2.0 -- not released
 

@@ -44,11 +44,13 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import hook
 from ._shared import (  # noqa: E402
-    CONFIG_DIR, DATA_DIR, DEFAULT_M0, DEFAULT_M1, DEFAULT_POLICY, HOME,
+    CONFIG_DIR, DATA_DIR, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0,
+    DEFAULT_M1, DEFAULT_POLICY, HOME,
     LOG_PATH, POLICY_PATH, SETTINGS_PATH,
-    MAX_STALE, STATE_PATH, WINDOW_SECONDS, model_matches, norm_path,
-    normalize_enforce, path_within,
+    MAX_STALE, STATE_PATH, WINDOW_SECONDS, bucket_pace, model_matches,
+    norm_path, normalize_enforce, path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -909,6 +911,43 @@ def describe_installation():
     return ("NOT REGISTERED -- nothing is pacing anything. Run: niceclaude install")
 
 
+def human_delta(seconds):
+    """Compact duration: 5d00h, 4h12m, 12m03s, 42s.
+
+    Rounded up at every scale. A wait that reads as shorter than it is would be
+    the one rounding error a person actually notices, because they will sit and
+    watch for it. Weekly-line waits run to days, hence the top unit: 119h is a
+    number you have to stop and divide.
+    """
+    s = max(0, int(seconds + 0.999))
+    if s >= 86400:
+        h = -(-s // 3600)
+        return f"{h // 24}d{h % 24:02d}h"
+    if s >= 3600:
+        m = -(-s // 60)
+        return f"{m // 60}h{m % 60:02d}m"
+    if s >= 60:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s}s"
+
+
+def describe_hold(p, enforced, chunk):
+    """How long this one line would hold work, in the row's last column.
+
+    An ignored bucket still gets its wait computed, but phrased as the
+    hypothetical it is: "would hold" is a line you could switch on with
+    `--enforce`, "HOLDS" is one stopping you now.
+    """
+    if not p["over"]:
+        return "clear"
+    if p["wait"] is None:
+        # Over the m0 floor with no reset clause to solve against. The hook
+        # cannot compute a release, so it just re-checks on the chunk.
+        return (f"{'HOLDS' if enforced else 'would hold'} "
+                f"-- unsolvable, re-checks every {human_delta(chunk)}")
+    return f"{'HOLDS' if enforced else 'would hold'} {human_delta(p['wait'])}"
+
+
 def cmd_status(path):
     pol = load_policy()
     key = norm_path(path)
@@ -920,11 +959,12 @@ def cmd_status(path):
     if matched is None:
         print("matched rule:   <none>  -> NOT paced")
         return 0
-    d = pol.get("defaults", {})
-    m0 = entry.get("m0", d.get('m0', DEFAULT_M0))
-    m1 = entry.get("m1", d.get('m1', DEFAULT_M1))
+    dflt = pol.get("defaults", {})
+    m0 = entry.get("m0", dflt.get('m0', DEFAULT_M0))
+    m1 = entry.get("m1", dflt.get('m1', DEFAULT_M1))
+    chunk = entry.get("chunk", dflt.get("chunk", DEFAULT_CHUNK))
     model = (entry.get("model") or "").lower()
-    enforce = normalize_enforce(entry.get("enforce", d.get("enforce")))
+    enforce = normalize_enforce(entry.get("enforce", dflt.get("enforce")))
     print(f"matched rule:   {matched}")
     print(f"  paced         {entry.get('paced', False)}")
     print(f"  model         {entry.get('model') or '<undeclared>'}")
@@ -946,28 +986,76 @@ def cmd_status(path):
               f"           demand, costing ~2s on that tool call), but nothing is\n"
               f"           sampling while you are idle, so `burn` and `plot` will\n"
               f"           be biased. Start it with: niceclaude watch")
+    # Every bucket is judged, including the ones this folder ignores. Which
+    # line is the painful one is not obvious in advance -- the weekly line
+    # rises at 0.60 %/h against the session line's 20 %/h, so the two produce
+    # waits that differ by orders of magnitude -- and seeing all three is how
+    # you decide whether the `--enforce` set is the one you want.
     for k, b in st["buckets"].items():
         enforced = ((k == "session" and "session" in enforce)
                     or (k == "week:all models" and "week" in enforce)
                     or ("model" in enforce and model_matches(k, model)))
-        if b["pct"] is None:
+        mark = "ENFORCED" if enforced else "ignored "
+        p = bucket_pace(b, now, m0, m1)
+        if p is None:
             print(f"  {k:22} unusable (no percentage)")
             continue
-        if b["resets_epoch"] is None:
-            # No reset clause yet. f_t is unknown, but allowed() is never below
-            # m0, so m0 is the safe floor to judge against.
-            hot = "  <-- OVER" if enforced and (b["pct"] + 1) > m0 else ""
-            print(f"  {k:22} {b['pct']:>3.0f}% used | line {m0:5.1f}% (floor) "
-                  f"| window start unknown | "
-                  f"{'ENFORCED' if enforced else 'ignored '}{hot}")
-            continue
-        start = b["resets_epoch"] - b["window_seconds"]
-        ft = (now - start) / b["window_seconds"]
-        allowed = m0 + ft * (100 - m0 - m1)
-        mark = "ENFORCED" if enforced else "ignored "
-        hot = "  <-- OVER" if enforced and (b["pct"] + 1) > allowed else ""
-        print(f"  {k:22} {b['pct']:>3.0f}% used | line {allowed:5.1f}% "
-              f"| {ft * 100:5.1f}% elapsed | {mark}{hot}")
+        if p["elapsed"] is None:
+            # No reset clause yet, so f_t is unknown and bucket_pace judged
+            # against the m0 floor. The line cannot be solved for a wake time.
+            where = f"line {m0:5.1f}% (floor) | window start unknown"
+        else:
+            where = (f"line {p['allowed']:5.1f}% "
+                     f"| {p['elapsed'] * 100:5.1f}% elapsed")
+        print(f"  {k:22} {p['pct']:>3.0f}% used | {where} | {mark} "
+              f"| {describe_hold(p, enforced, chunk)}")
+
+    # What the hook itself would decide, from this same snapshot -- asked of
+    # the hook rather than recomputed, so `status` cannot claim a folder is
+    # running while the hook is holding it.
+    d = hook.decide(pol, st, key, now, degraded=age > MAX_STALE)
+    print()
+    if not d.get("paced"):
+        print("right now:      not paced -- the hook returns immediately here")
+        return 0
+    if not d.get("braked"):
+        print("right now:      running -- no enforced line is over")
+        return 0
+
+    reason = d.get("reason", "")
+    wake_at = d.get("wake_at", now)
+    chunk = d.get("chunk", chunk)
+    # The sleep is chunked, so a frozen agent re-reads policy -- and re-derives
+    # this wait -- far more often than the wait itself is long. That is what
+    # lets `global off` free an already-frozen agent within one chunk.
+    nap = min(chunk, max(1.0, wake_at - now))
+    if d.get("blind"):
+        why = reason[len("BLIND: "):] if reason.startswith("BLIND: ") else reason
+        print(f"right now:      BRAKED, blind -- {why}")
+        if age > MAX_STALE:
+            # `status` has not attempted the refresh the hook tries first, so
+            # for a stale snapshot this is a conditional, not a verdict.
+            print("                The hook refreshes on demand before deciding, so it")
+            print("                only actually holds here if that refresh fails.")
+        print(f"                No release to solve for; it re-checks every "
+              f"{human_delta(chunk)}.")
+    else:
+        when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
+        print(f"right now:      BRAKED -- {reason}")
+        print(f"                releases in {human_delta(wake_at - now)} ({when} "
+              f"local); next check in {human_delta(nap)}")
+        print("                That release is not a promise: every session draws on")
+        print("                the same account-wide budget, so it can move out.")
+
+    reserve = entry.get("fanout_reserve",
+                        dflt.get("fanout_reserve", DEFAULT_FANOUT_RESERVE))
+    if reserve:
+        ds = hook.decide(pol, st, key, now, degraded=age > MAX_STALE,
+                         event="SubagentStart")
+        if ds.get("braked"):
+            extra = human_delta(ds.get("wake_at", now) - now)
+            print(f"                A SubagentStart is held to m1 {m1}+{reserve} "
+                  f"and waits {extra}.")
     return 0
 
 

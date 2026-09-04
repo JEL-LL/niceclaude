@@ -27,7 +27,7 @@ import time
 
 from ._shared import (
     DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1,
-    HOOK_LOG_PATH, MAX_BRAKE, normalize_enforce,
+    HOOK_LOG_PATH, MAX_BRAKE, bucket_pace, normalize_enforce,
     MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path, path_within,
 )
 
@@ -120,9 +120,6 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
                         defaults.get("fanout_reserve", DEFAULT_FANOUT_RESERVE))
     chunk = entry.get("chunk", defaults.get("chunk", DEFAULT_CHUNK))
     model = (entry.get("model") or "").lower()
-    span = 100 - m0 - m1
-    if span <= 0:
-        span = 1  # a nonsensical config must not divide by zero
 
     # Which windows this folder answers to. A project you are actively tending
     # may want the 5-hour line to smooth it out while ignoring the weekly line,
@@ -142,31 +139,22 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
 
     hot = []
     for key, b in enforced:
-        pct = b.get("pct")
-        if pct is None:
+        # The pace-line arithmetic lives in _shared so `status` can report the
+        # same numbers this brakes on, rather than a second implementation of
+        # them that drifts.
+        p = bucket_pace(b, now, m0, m1)
+        if p is None:
             hot.append((key, f"{key}: unusable", now + chunk))
             continue
-        # /usage reports whole percents, so a reported P could really be up to
-        # P+1. Round against ourselves.
-        pess = pct + 1
-        resets = b.get("resets_epoch")
-        window = b.get("window_seconds")
-        if resets is None or window is None:
-            # Right after a window rolls the server omits the reset clause, so
-            # f_t is unknown. allowed() never dips below m0, so judge against m0
-            # -- a freshly rolled 0%-used window sails through instead of
-            # braking at the exact moment headroom is greatest.
-            if pess > m0:
-                hot.append((key, f"{key} {pct}% over floor {m0}%", now + chunk))
+        if not p["over"]:
             continue
-        start = resets - window
-        ft = (now - start) / window
-        allowed = m0 + ft * span
-        if pess > allowed:
-            # Wake when the line rises to meet us -- but never later than the
-            # window's own reset, which zeroes usage anyway.
-            wake = min(start + ((pess - m0) / span) * window, resets)
-            hot.append((key, f"{key} {pct}% over line {allowed:.1f}%", wake))
+        if p["wake"] is None:
+            # No reset clause, so the line is unsolvable and we judged against
+            # the m0 floor. Re-check on the chunk until the clause reappears.
+            hot.append((key, f"{key} {p['pct']}% over floor {m0}%", now + chunk))
+        else:
+            hot.append((key, f"{key} {p['pct']}% over line {p['allowed']:.1f}%",
+                        p["wake"]))
 
     if hot:
         # Confident even when degraded: consumption only rises, so a stale

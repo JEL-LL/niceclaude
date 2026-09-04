@@ -254,6 +254,41 @@ niceclaude on ~/projects/nightly --model opus --fanout-reserve 10
 
 Default 0, which makes the two events behave identically.
 
+## Why it is stopped, and for how long
+
+A frozen agent looks identical to a hung one. `niceclaude status .`, run against
+the folder it is sitting in, prices every line and then says what the hook would
+do right now:
+
+```
+  session                 60% used | line  31.1% |  30.0% elapsed | ENFORCED | HOLDS 1h44m
+  week:all models         31% used | line  18.9% |  16.0% elapsed | ENFORCED | HOLDS 1d02h
+  week:Fable               3% used | line  18.9% |  16.0% elapsed | ignored  | clear
+
+right now:      BRAKED -- session 60% over line 31.1%; week:all models 31% over line 18.9%
+                releases in 1d02h (Sat 14:45 local); next check in 15s
+                That release is not a promise: every session draws on
+                the same account-wide budget, so it can move out.
+```
+
+Every line is priced, including the ones this folder ignores. Which line is the
+painful one is not obvious in advance — the weekly line rises at 0.60 %/h against
+the session line at 20 %/h, so their waits differ by orders of magnitude — and an
+`ignored` row reading in days is the argument for or against your `--enforce`
+set. Where a `--fanout-reserve` is configured, the stricter wait a
+`SubagentStart` faces is reported too.
+
+Two of those numbers are different things. **releases in** is when the line
+rises to meet current usage. **next check in** is the sleep chunk: a braked
+agent re-reads policy and re-derives its release that often, which is both why
+`niceclaude global off` frees it within 15s and why the release time can move
+out while it waits.
+
+The verdict line comes from the hook's own `decide()` rather than a second copy
+of the arithmetic, so `status` cannot report `running` while the hook is holding
+the agent. When the snapshot is too stale to trust, it says `BRAKED, blind` and
+prints no release at all, because there is none to solve for.
+
 ## Knowing whether it is worth running
 
 ```bash
@@ -306,7 +341,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-153 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
+172 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 

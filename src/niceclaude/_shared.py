@@ -157,3 +157,48 @@ def path_within(cwd, key):
         return True
     prefix = key if key.endswith(os.sep) else key + os.sep
     return cwd.startswith(prefix)
+
+
+def bucket_pace(bucket, now, m0, m1):
+    """Where one usage bucket stands against the pace line, and when it clears.
+
+    The hook and `status` both need this arithmetic, and a second copy of it is
+    how they would begin to disagree -- the same reason `path_within` is shared.
+
+    Returns None for a bucket carrying no percentage. Otherwise a dict:
+
+        pct      as reported by /usage
+        pess     pct + 1. /usage reports whole percents, so a reported P could
+                 really be up to P+1; round against ourselves.
+        allowed  the line's height right now, in percent
+        elapsed  fraction of the window elapsed, or None when the snapshot
+                 carries no reset clause -- which is what a freshly rolled
+                 window looks like. allowed() never dips below m0, so m0 is the
+                 safe floor to judge against until the clause reappears.
+        over     is `pess` above the line
+        wait     seconds until the line rises to meet `pess`, or None when
+                 nothing is over the line or the window start is unknown
+        wake     the epoch that wait counts down to, clamped to the window's own
+                 reset, which zeroes usage anyway
+    """
+    pct = bucket.get("pct")
+    if pct is None:
+        return None
+    span = 100 - m0 - m1
+    if span <= 0:
+        span = 1  # a nonsensical config must not divide by zero
+    pess = pct + 1
+    resets = bucket.get("resets_epoch")
+    window = bucket.get("window_seconds")
+    if resets is None or window is None:
+        return {"pct": pct, "pess": pess, "allowed": m0, "elapsed": None,
+                "over": pess > m0, "wait": None, "wake": None}
+    start = resets - window
+    elapsed = (now - start) / window
+    allowed = m0 + elapsed * span
+    if pess <= allowed:
+        return {"pct": pct, "pess": pess, "allowed": allowed,
+                "elapsed": elapsed, "over": False, "wait": None, "wake": None}
+    wake = min(start + ((pess - m0) / span) * window, resets)
+    return {"pct": pct, "pess": pess, "allowed": allowed, "elapsed": elapsed,
+            "over": True, "wait": max(0.0, wake - now), "wake": wake}
