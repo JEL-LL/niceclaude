@@ -1277,54 +1277,464 @@ class _VersionAction(argparse.Action):
         parser.exit(cmd_version())
 
 
-def main():
+# --- help text ---------------------------------------------------------------
+#
+# One entry per subcommand: the one-line summary the overview lists, the page
+# that `niceclaude help <command>` and `niceclaude <command> --help` print, and
+# optional examples printed after the options. Kept together, and apart from
+# the parser, so the prose reads as prose. build_parser() looks every command
+# up here, so a command with no entry cannot be built at all.
+#
+# The text is printed verbatim (RawDescriptionHelpFormatter), so it is wrapped
+# here at 79 columns and the paragraphs are left as written. Argument help is
+# different: argparse re-wraps it, so those strings live beside the arguments.
+
+COMMAND_HELP = {
+    "install": dict(
+        summary="register the hook in Claude Code's settings",
+        description="""\
+Register the hook in Claude Code's user settings.
+
+Merges a niceclaude-hook entry onto the PreToolUse and SubagentStart events in
+Claude Code's settings.json (under ~/.claude, or CLAUDE_CONFIG_DIR). The rest
+of that file -- your model, permissions, and other hooks on the same events --
+is preserved, a file that cannot be parsed is refused rather than overwritten,
+and running install twice updates the entry in place instead of registering
+it twice.
+
+Once registered, every session consults policy.json on every tool call. A
+folder with no matching rule costs ~20ms and is otherwise untouched, so turning
+pacing on or off is afterwards only ever `niceclaude on` / `niceclaude off`.
+Set NICECLAUDE_OFF=1 in a shell to exempt the sessions started from it.
+
+The same registration is also written as a standalone fragment (path printed)
+that `claude --settings <fragment>` applies to one session, for anyone who
+would rather opt sessions in than carry the hook everywhere.
+
+policy.json is created with defaults if it does not exist, and otherwise left
+alone unless you pass --force.
+""",
+        examples="""\
+examples:
+  niceclaude install
+  niceclaude install --force      # start over with a default policy.json
+"""),
+
+    "uninstall": dict(
+        summary="un-register the hook, keeping policy and logs",
+        description="""\
+Un-register the hook, keeping policy and logs.
+
+Removes exactly the niceclaude-hook entries `install` added to Claude Code's
+settings.json and leaves the rest of the file as it was. The settings fragment
+is deleted too. policy.json, usage.jsonl and state.json are kept, so a later
+`niceclaude install` picks up the same folders and margins.
+
+This stops pacing everywhere at once. To stop it for one folder use
+`niceclaude off`; to suspend every rule while keeping the hook registered use
+`niceclaude global off`.
+"""),
+
+    "version": dict(
+        summary="print the installed version",
+        description="""\
+Print the installed version.
+
+The number is read from the installed distribution's metadata, not from the
+source tree, so it reports what is actually running. A stale build beside a
+newer checkout looks identical in every other way; this is how the two are
+told apart. Exits nonzero when no distribution is installed at all.
+`niceclaude --version` prints the same thing.
+"""),
+
+    "watch": dict(
+        summary="poll usage forever (the daemon)",
+        description="""\
+Poll usage forever: the daemon.
+
+Every --interval seconds, run `claude -p /usage`, append the verbatim output
+and its parsed buckets to usage.jsonl, and publish the parsed snapshot to
+state.json for the hook to read. A failed poll is logged and the previous
+snapshot is left to age out rather than overwritten; the hook treats a
+snapshot older than 180s as stale and refreshes it on demand.
+
+Runs in the foreground and writes a pidfile, so a second copy refuses to
+start. Stop it with `niceclaude stop`. deploy/ has a systemd user unit, a
+container entrypoint, and a Windows Scheduled Task script for keeping it
+running.
+
+Pacing works without the daemon -- the hook refreshes a stale snapshot itself,
+costing ~2s on that one tool call -- but only the daemon records idle time, so
+`burn` and `plot` are biased without it.
+""",
+        examples="""\
+examples:
+  niceclaude watch                 # foreground; Ctrl-C or `niceclaude stop`
+  niceclaude watch --interval 120
+"""),
+
+    "sample": dict(
+        summary="one poll, printed and logged",
+        description="""\
+Take one poll, print it, and log it.
+
+Runs `claude -p /usage` once, appends the record to usage.jsonl, and prints
+the parsed record as JSON (everything but the verbatim raw text). It does NOT
+publish to state.json, so the hook never sees it; use `refresh` for that.
+
+Exits nonzero if the poll failed or any line went unparsed, which makes this
+the quickest check that the parser still understands what `/usage` prints.
+"""),
+
+    "refresh": dict(
+        summary="one poll, written to the state file",
+        description="""\
+Take one poll and publish it to the state file.
+
+Runs `claude -p /usage` once, appends the record to usage.jsonl, and if it
+parsed writes the snapshot to state.json, which is what the hook reads. This
+is the command the hook itself runs when it finds the snapshot older than
+180s, and it is what keeps pacing working with no daemon.
+
+Exits nonzero if the poll failed or produced no buckets; the old snapshot is
+then left alone.
+"""),
+
+    "check": dict(
+        summary="run misparse assertions over the log",
+        description="""\
+Run misparse assertions over the whole log.
+
+Every sample stores the verbatim `/usage` output, so this re-parses the entire
+history with the current parser and reports anything that does not hold:
+lines that went unparsed, percentages or reset clauses that could not be read,
+and usage that DECREASED inside a window without the window rolling -- which
+never happens, so it can only be a misparse.
+
+Run it after changing the parser, or when a snapshot looks wrong. Exits
+nonzero when there are problems, or when there are no records to check.
+"""),
+
+    "stop": dict(
+        summary="stop the running daemon",
+        description="""\
+Stop the running daemon.
+
+Reads the pidfile `watch` wrote and terminates that process (SIGTERM, or
+taskkill on Windows). Prints "no daemon running" and exits 0 if there is none,
+including when the pidfile is left over from a process that has already gone.
+
+Use this rather than killing by name: any shell whose command line merely
+mentions `niceclaude watch` matches the same pattern, so a name-based kill can
+take out its own wrapper.
+"""),
+
+    "on": dict(
+        summary="pace a folder and its subfolders",
+        description="""\
+Pace a folder and everything under it.
+
+Writes a rule for PATH into policy.json. A rule matches the folder and every
+subfolder, by path component (so /a/b never matches /a/bc), and the longest
+matching rule wins: a deeper `on` or `off` overrides a shallower one, and the
+filesystem root is a valid catch-all. The hook re-reads policy.json on every
+tool call, so the change reaches an already-running agent at its next
+checkpoint.
+
+Running `on` again for a path that already has a rule changes only the
+settings you name and keeps the rest. Settings a rule does not carry fall back
+to the `defaults` block of policy.json (initially m0 5, m1 8, no cap), which
+`niceclaude list` prints.
+
+Each window's pace line is  allowed = m0 + f_t * (100 - m0 - m1),  where f_t
+is the fraction of the window's time elapsed. Usage over the line brakes the
+folder until the line catches up.
+
+The hook cannot discover the running model, so the per-model weekly bucket is
+enforced only when --model is declared.
+""",
+        examples="""\
+examples:
+  niceclaude on ~/projects/nightly --model opus
+  niceclaude on ~/projects/alpha --model opus --enforce session
+  niceclaude on ~/projects/nightly --max-delay 240
+  niceclaude on / --model opus              # pace everything, then carve
+  niceclaude off ~/projects/urgent          #   out what should run free
+"""),
+
+    "off": dict(
+        summary="stop pacing a folder",
+        description="""\
+Stop pacing a folder, and everything under it.
+
+Writes a rule for PATH with paced false. Because the longest matching rule
+wins, this is also how a subtree is carved out of a paced parent: `on ~/work`
+then `off ~/work/vendor` paces everything under ~/work except vendor. The rule
+is kept rather than deleted, so a later `niceclaude on` for the same path
+restores it with its settings intact. Running agents see the change at their
+next tool call.
+
+To release every folder at once without touching any rule, use `niceclaude
+global off`. To exempt one session rather than one folder, start it with
+NICECLAUDE_OFF=1.
+""",
+        examples="""\
+examples:
+  niceclaude off ~/projects/nightly
+  niceclaude off ~/projects/nightly/vendor  # carve a subtree out of a rule
+"""),
+
+    "global": dict(
+        summary="master switch for every folder",
+        description="""\
+Master switch for every folder.
+
+`global off` suspends every rule at once; `global on` restores them. It is a
+kill switch only and never enables pacing anywhere: a folder is paced if and
+only if some rule matches it, and this switch just gates whether the rules are
+consulted. It defaults to on, so `global on` is only ever the undo for an
+earlier `global off`.
+
+An agent the hook is already holding re-reads policy.json every 15s while it
+waits, so `global off` frees it within that.
+
+To pace everything, pace a folder that contains everything: `niceclaude on /`
+(or `niceclaude on C:\\`) is a valid catch-all, and `off` rules below it still
+carve out.
+""",
+        examples="""\
+examples:
+  niceclaude global off            # break glass: release everything
+  niceclaude global on             # resume the rules as they were
+"""),
+
+    "status": dict(
+        summary="explain the policy for a folder",
+        description="""\
+Explain the policy for a folder, and what the hook would do there right now.
+
+For PATH (default: the current directory) this reports whether the hook is
+registered at all, the global switch, which rule matched and its effective
+settings (model, m0/m1, max_delay, enforced windows), and then every usage
+bucket in the current snapshot: percent used, where the pace line is, and the
+hold each one would impose, whether or not this folder enforces it. Seeing the
+ignored buckets priced is how an --enforce choice is checked rather than
+guessed at.
+
+The final "right now" verdict comes from the hook's own decision function on
+the same snapshot, so status cannot say running about a folder the hook is
+holding. When braked it gives the reason, the release time, and how often the
+hold is re-evaluated; with a max_delay set it says what the cap will actually
+do.
+
+Warns when the snapshot is older than 180s, which usually means `watch` is not
+running. If NICECLAUDE_OFF is set in this shell it says so, instead of
+claiming the folder is paced.
+""",
+        examples="""\
+examples:
+  niceclaude status                # the current directory
+  niceclaude status ~/projects/nightly
+"""),
+
+    "list": dict(
+        summary="show all configured folders",
+        description="""\
+Show all configured folders.
+
+Prints the global switch, the `defaults` block, and every rule in policy.json
+with its settings, sorted by path. This is the whole policy; `status` explains
+how it applies to one folder.
+"""),
+
+    "burn": dict(
+        summary="characterize burn rate and duty cycle",
+        description="""\
+Characterize burn rate, and the duty cycle it implies.
+
+Reads usage.jsonl and reports, per bucket, how fast usage is consumed: the
+average rate with idle time included (what you are actually spending), the
+p90 of busy bins (what heavy work costs while it runs), and how fast the pace
+line rises, for comparison. The ratio of the last two is the duty cycle: how
+much of the clock a paced agent can actually be working.
+
+Instantaneous rates are meaningless with 1% quantization and 60s sampling -- a
+single tick reads as 60%/h -- so samples are binned (--bin-minutes) before
+differencing. Needs at least two samples. Warns if the record looks
+activity-driven rather than continuous, which is what happens without `watch`
+running: idle time is then missing and every average is overstated.
+"""),
+
+    "plot": dict(
+        summary="graph utilization against the pace line",
+        description="""\
+Graph recorded utilization against the pace line.
+
+Reads usage.jsonl and draws, per window, the recorded utilization over the
+pace line, marking where it ran over. This answers the question the whole tool
+exists to serve: is consumption actually tracking the line, and when did it
+run hot?
+
+Requires matplotlib, which is an optional extra:
+
+    uv tool install "niceclaude[plot]"
+
+The daemon and the hook never import it, so nothing else pays for it.
+"""),
+
+    "help": dict(
+        summary="detailed help for one command",
+        description="""\
+Show detailed help for one command.
+
+`niceclaude help <command>` prints that command's full page: what it does and
+what it reads and writes, each argument with its default, and examples. It is
+the same page as `niceclaude <command> --help`. With no command, it prints the
+overview and the list of commands.
+""",
+        examples="""\
+examples:
+  niceclaude help                  # the overview
+  niceclaude help on
+  niceclaude help status
+"""),
+}
+
+
+def _command(sub, name):
+    """Add one subcommand, wired to its COMMAND_HELP entry."""
+    spec = COMMAND_HELP[name]
+    return sub.add_parser(
+        name, help=spec["summary"], description=spec["description"],
+        epilog=spec.get("examples"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+
+
+def build_parser():
+    """The parser, and the subcommand action whose `.choices` maps each command
+    name to its own parser.
+
+    Separate from main() so that `help` can print a sibling command's page,
+    and so a test can walk every command and check that it has one.
+    """
     ap = argparse.ArgumentParser(
         prog="niceclaude", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action=_VersionAction,
                     help="print the installed version and exit")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(
+        dest="cmd", required=True, metavar="<command>", title="commands",
+        help="one of the commands below; `niceclaude help <command>` "
+             "describes it in full")
 
-    i = sub.add_parser("install", help="register the hook in Claude Code's settings")
-    i.add_argument("--force", action="store_true", help="reset policy.json too")
-    sub.add_parser("uninstall", help="un-register the hook, keeping policy and logs")
-    sub.add_parser("version", help="print the installed version")
-    w = sub.add_parser("watch", help="poll usage forever (the daemon)")
-    w.add_argument("--interval", type=int, default=60)
-    sub.add_parser("sample", help="one poll, printed and logged")
-    sub.add_parser("refresh", help="one poll, written to the state file")
-    sub.add_parser("check", help="run misparse assertions over the log")
-    sub.add_parser("stop", help="stop the running daemon")
-    o = sub.add_parser("on", help="pace a folder and its subfolders")
-    o.add_argument("path"); o.add_argument("--model")
-    o.add_argument("--m0", type=float); o.add_argument("--m1", type=float)
+    i = _command(sub, "install")
+    i.add_argument("--force", action="store_true",
+                   help="reset policy.json to the defaults as well; without "
+                        "this an existing policy is kept")
+    _command(sub, "uninstall")
+    _command(sub, "version")
+    w = _command(sub, "watch")
+    w.add_argument("--interval", type=int, default=60, metavar="SECONDS",
+                   help="seconds between polls (default: %(default)s); each "
+                        "poll is one `claude -p /usage` call of about 2s")
+    _command(sub, "sample")
+    _command(sub, "refresh")
+    _command(sub, "check")
+    _command(sub, "stop")
+    o = _command(sub, "on")
+    o.add_argument("path",
+                   help="the folder to pace; subfolders inherit the rule "
+                        "unless a deeper rule overrides it")
+    o.add_argument("--model",
+                   help="the model sessions in this folder run as (opus, "
+                        "sonnet, fable ...). Hooks are not told the model, so "
+                        "it must be declared; it selects the per-model weekly "
+                        "bucket, which goes unenforced without it")
+    o.add_argument("--m0", type=float, metavar="PCT",
+                   help="starting allowance, in percent of the window "
+                        "(default: the policy's, initially 5). Without it "
+                        "the pure diagonal would permit 0%% at 0%% elapsed "
+                        "and nothing could ever begin")
+    o.add_argument("--m1", type=float, metavar="PCT",
+                   help="end-of-window reserve, in percent (default: the "
+                        "policy's, initially 8). The line reaches 100 - m1 "
+                        "at the window's end, so work comes in under the "
+                        "wire rather than exactly on it")
     o.add_argument("--fanout-reserve", type=float, dest="fanout_reserve",
-                   help="extra reserve demanded of SubagentStart, on top of m1")
+                   metavar="PCT",
+                   help="extra reserve demanded of SubagentStart, on top of "
+                        "m1 (default 0). Spawning a fan-out commits to far "
+                        "more than one more step, so it can be held to a "
+                        "higher bar while running agents finish")
     cap = o.add_mutually_exclusive_group()
     cap.add_argument("--max-delay", type=float, dest="max_delay",
-                     help="cap one hold at this many seconds, then proceed while "
-                          "still over the line and brake again next tool call; "
-                          "keeps a wait shorter than the prompt cache TTL")
+                     metavar="SECONDS",
+                     help="cap one hold at this many seconds, then proceed "
+                          "while still over the line and brake again at the "
+                          "next tool call. Keeps a wait shorter than the "
+                          "prompt cache TTL, so the next turn is not re-read "
+                          "from cold. Default: no cap, hold until the line "
+                          "catches up")
     cap.add_argument("--no-max-delay", action="store_true", dest="no_max_delay",
-                     help="remove the cap: hold until the line catches up")
-    o.add_argument("--enforce",
-                   help="comma-separated windows to pace against: session, week, "
-                        "model (default: all three)")
-    f = sub.add_parser("off", help="stop pacing a folder")
-    f.add_argument("path")
-    g = sub.add_parser("global", help="master switch for every folder")
-    g.add_argument("state", choices=["on", "off"])
-    s = sub.add_parser("status", help="explain the policy for a folder")
-    s.add_argument("path", nargs="?", default=os.getcwd())
-    sub.add_parser("list", help="show all configured folders")
-    bn = sub.add_parser("burn", help="characterize burn rate and duty cycle")
-    bn.add_argument("--bin-minutes", type=int, default=BIN_MINUTES)
-    pl = sub.add_parser("plot", help="graph utilization against the pace line")
-    pl.add_argument("-o", "--out", default="niceclaude-usage.png")
-    pl.add_argument("--m0", type=float, default=DEFAULT_M0)
-    pl.add_argument("--m1", type=float, default=DEFAULT_M1)
+                     help="remove the cap: hold until the line catches up. "
+                          "Writes an explicit null, so it also overrides a "
+                          "cap set in the policy's defaults")
+    o.add_argument("--enforce", metavar="WINDOWS",
+                   help="comma-separated windows to pace against: session "
+                        "(the 5h window), week (the shared weekly window), "
+                        "model (the per-model weekly window). Default: all "
+                        "three. `status` prices the ignored ones too")
+    f = _command(sub, "off")
+    f.add_argument("path",
+                   help="the folder to stop pacing; subfolders follow unless "
+                        "a deeper rule overrides it")
+    g = _command(sub, "global")
+    g.add_argument("state", choices=["on", "off"],
+                   help="off suspends every rule; on restores them")
+    s = _command(sub, "status")
+    s.add_argument("path", nargs="?", default=os.getcwd(),
+                   help="the folder to explain (default: the current "
+                        "directory)")
+    _command(sub, "list")
+    bn = _command(sub, "burn")
+    bn.add_argument("--bin-minutes", type=int, default=BIN_MINUTES,
+                    metavar="MINUTES",
+                    help="width of the smoothing bin (default: %(default)s)")
+    pl = _command(sub, "plot")
+    pl.add_argument("-o", "--out", default="niceclaude-usage.png",
+                    metavar="FILE",
+                    help="where to write the image (default: %(default)s)")
+    pl.add_argument("--m0", type=float, default=DEFAULT_M0, metavar="PCT",
+                    help="m0 of the line to draw (default: %(default)s). "
+                         "Drawing only; the policy is unchanged")
+    pl.add_argument("--m1", type=float, default=DEFAULT_M1, metavar="PCT",
+                    help="m1 of the line to draw (default: %(default)s). "
+                         "Drawing only; the policy is unchanged")
+    h = _command(sub, "help")
+    which = h.add_argument("command", nargs="?", metavar="command",
+                           help="the command to describe; with none, print "
+                                "the overview")
+    # Validated against the finished list, so a typo is rejected with the
+    # valid names rather than raising KeyError below. Includes `help` itself.
+    which.choices = list(sub.choices)
+    return ap, sub
 
-    a = ap.parse_args()
+
+def cmd_help(ap, sub, name):
+    """`niceclaude help [command]`: the overview, or one command's full page.
+
+    Prints exactly what `niceclaude <command> --help` prints, from the same
+    parser object, so the two ways in cannot drift apart.
+    """
+    (ap if name is None else sub.choices[name]).print_help()
+    return 0
+
+
+def main(argv=None):
+    ap, sub = build_parser()
+    a = ap.parse_args(argv)
+    if a.cmd == "help":
+        return cmd_help(ap, sub, a.command)
     if a.cmd == "install":
         return cmd_install(a.force)
     if a.cmd == "uninstall":

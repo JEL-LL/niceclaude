@@ -116,6 +116,10 @@ matching rule are untouched: the hook answers *"is this folder paced?"* from
 `policy.json` alone, with no snapshot read, no subprocess and no network, so it
 is a genuine no-op there (~20ms).
 
+Every command has a full page. `niceclaude help on` (or `niceclaude on --help`)
+says what the command does and what it reads and writes, describes each argument
+with its default, and gives examples. `niceclaude help` alone lists the commands.
+
 `install` **merges** into `~/.claude/settings.json` rather than writing it. Your
 `model`, `permissions`, and your own hooks — including other hooks on the same
 two events — all survive, and a file it cannot parse is refused rather than
@@ -388,7 +392,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-172 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
+261 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 

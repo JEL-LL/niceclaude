@@ -15,6 +15,10 @@ refactors and internal cleanups do not need a line at all.
 
 ### Added
 
+- `niceclaude help <command>` prints a full page for one command: what it does
+  and what it reads and writes, every argument with its default, and examples.
+  It is the same page as `<command> --help`, which until now listed most flags
+  with no explanation at all. `niceclaude help` alone prints the overview.
 - `niceclaude status` now answers "how long, and which line". Each usage bucket
   gets the wait it would impose (`HOLDS 1h44m`), and the summary says what the
   hook would decide right now: the reason, the release time, and the re-check
