@@ -23,6 +23,25 @@ refactors and internal cleanups do not need a line at all.
   is what makes `--enforce` a decision you can check rather than guess at: the
   weekly line rises at 0.60 %/h against the session line at 20 %/h, so an
   `ignored` row reading in days is worth seeing.
+- `--max-delay` caps how long a single brake may hold, in seconds. Over the
+  line, the hook holds that long, releases while still over, and brakes again at
+  the next tool call — so the restraint is applied as many short holds rather
+  than one long one. The point is the prompt cache: a hold that outlives its TTL
+  makes the next turn re-read the whole context from cold, so a wait taken to
+  save budget can cost more than it saved. Off by default; this is the one
+  setting that deliberately proceeds while over the line. Releases are logged as
+  `max_delay-release`, distinct from `line-caught-up`. `--no-max-delay` removes
+  a cap, writing an explicit `null` so that it also overrides one set in
+  `defaults`.
+
+### Fixed
+
+- `niceclaude status` marked every enforced bucket `ENFORCED` and printed a hold
+  time even for a folder switched off with `niceclaude off`, or with
+  `global off` in force. The verdict line below it correctly said `not paced`,
+  so the table contradicted the verdict — and the table is the part that gets
+  scanned. Such rows now read `ignored` / `would hold`, with a line saying which
+  switch is off. Behaviour was always correct; only the report was wrong.
 
 ### Changed
 

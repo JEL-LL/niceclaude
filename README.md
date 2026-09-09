@@ -254,6 +254,53 @@ niceclaude on ~/projects/nightly --model opus --fanout-reserve 10
 
 Default 0, which makes the two events behave identically.
 
+## Capping a single hold, so the prompt cache survives it
+
+Being far over the line can solve to a wait of hours. That is correct as
+restraint and can be self-defeating in practice: a hold longer than the prompt
+cache TTL means the next turn re-reads the whole context from cold, so a wait
+taken to save budget can cost more than it saved.
+
+`--max-delay` caps **one hold**, not the total restraint:
+
+```bash
+niceclaude on ~/projects/nightly --model opus --max-delay 240   # seconds
+```
+
+Over the line, the hook now holds four minutes, releases while *still* over,
+lets the agent take one step, and brakes again at the next `PreToolUse`. The
+restraint is still applied — just as many short holds rather than one long one,
+and the duty cycle it produces is roughly the same. What changes is that no
+single wait outlives the cache.
+
+Default is no limit, which holds until the line catches up. Pick a value under
+your cache TTL; note the TTL drops sharply once an account is on overage
+billing, so a cap chosen for the normal case may not help there.
+
+To remove a cap:
+
+```bash
+niceclaude on ~/projects/nightly --no-max-delay
+```
+
+That writes an explicit `null` rather than dropping the key, so it also
+overrides a cap set in `defaults` — otherwise "off" would silently leave one in
+force wherever a default is configured.
+
+This is the one setting that deliberately proceeds while over the line, so it
+is opt-in. `niceclaude status` reports the cap and what it will actually do:
+
+```
+right now:      BRAKED -- session 90% over line 48.5%
+                holds 4m00s (max_delay), then proceeds while still over
+                the line; the line itself clears in 2h27m (Tue 17:46 local).
+                Each later tool call brakes again for up to 4m00s.
+```
+
+Releases from a cap are logged as `max_delay-release` — distinct from
+`line-caught-up`, so `hook.log` never conflates "we waited it out" with "we gave
+up waiting".
+
 ## Why it is stopped, and for how long
 
 A frozen agent looks identical to a hung one. `niceclaude status .`, run against

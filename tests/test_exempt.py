@@ -135,3 +135,62 @@ def test_status_surfaces_an_active_exemption(tmp_path, monkeypatch):
                         lambda: "/home/me/.local/bin/niceclaude-hook")
     assert cli.cmd_install(force=False) == 0
     assert "EXEMPT" in cli.describe_installation()
+
+
+# --- the bucket table has to agree with the verdict --------------------------
+#
+# Same obligation as above, one level down. A switched-off folder keeps its rule
+# and its enforce set on file, so reading that set alone marked every bucket
+# ENFORCED and printed a hold time -- directly contradicting the "not paced"
+# verdict four lines below it, and the table is the part that gets scanned.
+
+SESSION_WINDOW = 5 * 3600
+
+
+def _status_lines(tmp_path, monkeypatch, capsys, *, paced, genabled):
+    now = 1_760_000_000
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state = tmp_path / "state.json"
+    policy = tmp_path / "policy.json"
+    state.write_text(json.dumps({
+        "ts_epoch": now - 10, "ts": "x", "ok": True,
+        "buckets": {"session": {"pct": 90, "resets_epoch": now + SESSION_WINDOW // 2,
+                                "window_seconds": SESSION_WINDOW, "label": None}},
+    }), encoding="utf-8")
+    policy.write_text(json.dumps({
+        "global": {"enabled": genabled},
+        "defaults": {"m0": 5, "m1": 8, "chunk": 15},
+        "paths": {norm_path(str(proj)): {"paced": paced, "model": "opus",
+                                         "enforce": ["session"]}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(cli, "POLICY_PATH", str(policy))
+    monkeypatch.setattr(cli, "STATE_PATH", str(state))
+    monkeypatch.setattr(hook, "POLICY_PATH", str(policy))
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    cli.cmd_status(str(proj))
+    return capsys.readouterr().out
+
+
+def test_an_off_folder_is_not_shown_as_enforced(tmp_path, monkeypatch, capsys):
+    out = _status_lines(tmp_path, monkeypatch, capsys, paced=False, genabled=True)
+    assert "not paced" in out
+    assert "ENFORCED" not in out
+    assert "HOLDS" not in out
+    assert "paced false" in out
+
+
+def test_global_off_is_not_shown_as_enforced(tmp_path, monkeypatch, capsys):
+    out = _status_lines(tmp_path, monkeypatch, capsys, paced=True, genabled=False)
+    assert "not paced" in out
+    assert "ENFORCED" not in out
+    assert "HOLDS" not in out
+    assert "global.enabled false" in out
+
+
+def test_a_live_folder_still_reports_enforced(tmp_path, monkeypatch, capsys):
+    """The contrast case -- the fix must not mark everything ignored."""
+    out = _status_lines(tmp_path, monkeypatch, capsys, paced=True, genabled=True)
+    assert "ENFORCED" in out
+    assert "HOLDS" in out
+    assert "BRAKED" in out

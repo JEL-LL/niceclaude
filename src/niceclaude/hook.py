@@ -27,7 +27,7 @@ import time
 
 from ._shared import (
     DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1,
-    HOOK_LOG_PATH, MAX_BRAKE, bucket_pace, normalize_enforce,
+    DEFAULT_MAX_DELAY, HOOK_LOG_PATH, MAX_BRAKE, bucket_pace, normalize_enforce,
     MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path, path_within,
 )
 
@@ -86,7 +86,8 @@ def paced_entry(policy, cwd):
 
 
 def decide(policy, state, cwd, now, degraded=False, event=None):
-    """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..}.
+    """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..,
+    'chunk':..,'max_delay':..}.
 
     `degraded` means the snapshot is older than MAX_STALE and could not be
     refreshed -- we are flying blind. Stale data is not useless, though: usage
@@ -119,6 +120,10 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
         m1 += entry.get("fanout_reserve",
                         defaults.get("fanout_reserve", DEFAULT_FANOUT_RESERVE))
     chunk = entry.get("chunk", defaults.get("chunk", DEFAULT_CHUNK))
+    # Resolved here rather than once at the start of a brake, so that -- like
+    # every other knob -- a policy edit reaches an already-frozen agent within
+    # one chunk instead of only on its next tool call.
+    max_delay = entry.get("max_delay", defaults.get("max_delay", DEFAULT_MAX_DELAY))
     model = (entry.get("model") or "").lower()
 
     # Which windows this folder answers to. A project you are actively tending
@@ -135,7 +140,7 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
     if not enforced:
         return {"paced": True, "braked": True, "wake_at": now + chunk,
                 "reason": "no usable buckets in snapshot", "chunk": chunk,
-                "blind": True}
+                "max_delay": max_delay, "blind": True}
 
     hot = []
     for key, b in enforced:
@@ -162,7 +167,7 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
         return {"paced": True, "braked": True,
                 "wake_at": max(h[2] for h in hot),
                 "reason": "; ".join(h[1] for h in hot),
-                "chunk": chunk, "blind": False}
+                "chunk": chunk, "max_delay": max_delay, "blind": False}
 
     if degraded:
         # Under the line according to data we know to be out of date. That is
@@ -172,9 +177,10 @@ def decide(policy, state, cwd, now, degraded=False, event=None):
         age = int(now - (state.get("ts_epoch") or now))
         return {"paced": True, "braked": True, "wake_at": now + chunk,
                 "reason": f"BLIND: snapshot {age}s old and refresh failing",
-                "chunk": chunk, "blind": True}
+                "chunk": chunk, "max_delay": max_delay, "blind": True}
 
-    return {"paced": True, "braked": False, "chunk": chunk, "blind": False}
+    return {"paced": True, "braked": False, "chunk": chunk,
+            "max_delay": max_delay, "blind": False}
 
 
 # Backoff for refresh attempts. If /usage is unreachable -- network down, auth
@@ -263,6 +269,24 @@ def run(cwd, event=None):
             return brake_start, ("MAX_BRAKE-timeout-WHILE-BLIND"
                                  if d.get("blind") else "MAX_BRAKE-timeout")
 
+        # A configured max_delay caps ONE hold, not the total wait. We release
+        # while still over the line, the agent takes one more step, and the next
+        # PreToolUse brakes again -- so the restraint survives, but it is applied
+        # as many short holds rather than one long one.
+        #
+        # The point is the prompt cache. A hold long enough to outlive the cache
+        # TTL means the next turn re-reads the whole context from cold, so a wait
+        # taken to save budget can end up costing more than it saved. Capping the
+        # hold below the TTL keeps each wait cache-warm.
+        #
+        # This is the one place the tool deliberately proceeds while over the
+        # line, blind included -- MAX_BRAKE above has the same escape. It is opt
+        # in, and off by default, precisely because it loosens the guarantee.
+        max_delay = d.get("max_delay")
+        if max_delay is not None and now - brake_start >= max_delay:
+            return brake_start, ("max_delay-release-WHILE-BLIND"
+                                 if d.get("blind") else "max_delay-release")
+
         # Sleep in bounded chunks and re-decide. The wake time is NOT a
         # commitment: the foreground session and sibling agents draw on the same
         # account-global budget and can push it later while we wait.
@@ -273,6 +297,12 @@ def run(cwd, event=None):
         # within one chunk instead of one backoff interval.
         chunk = d.get("chunk", DEFAULT_CHUNK)
         nap = min(chunk, max(1.0, d.get("wake_at", now + chunk) - now))
+        if max_delay is not None:
+            # Without this a max_delay shorter than the chunk would still sleep a
+            # whole chunk, so `--max-delay 5` under the default 15s chunk would
+            # hold for 15. Never below 1s: the release check above uses >=, so a
+            # zero nap would spin.
+            nap = max(1.0, min(nap, brake_start + max_delay - now))
         time.sleep(nap)
 
 

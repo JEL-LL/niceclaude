@@ -63,6 +63,15 @@ DEFAULT_CHUNK = 15
 # agent finish. 0 disables it; the two events then behave identically.
 DEFAULT_FANOUT_RESERVE = 0
 
+# Cap on a single hold, not on the total restraint: at the cap the hook releases
+# while still over the line, the agent takes one step, and the next tool call
+# brakes again. The point is the prompt cache -- a hold that outlives its TTL
+# makes the next turn re-read the whole context from cold, so a wait taken to
+# save budget can cost more than it saved. None means hold until the line
+# catches up, which is the default because this is the one knob that
+# deliberately lets work proceed while over the line.
+DEFAULT_MAX_DELAY = None
+
 MAX_STALE = 180      # a snapshot older than this is not trusted
 MAX_BRAKE = 21600    # 6h; by then every window has certainly rolled
 
@@ -70,7 +79,8 @@ WINDOW_SECONDS = {"session": 5 * 3600, "week": 7 * 86400}
 
 DEFAULT_POLICY = {
     "global": {"enabled": True},
-    "defaults": {"m0": DEFAULT_M0, "m1": DEFAULT_M1, "chunk": DEFAULT_CHUNK},
+    "defaults": {"m0": DEFAULT_M0, "m1": DEFAULT_M1, "chunk": DEFAULT_CHUNK,
+                 "max_delay": DEFAULT_MAX_DELAY},
     "paths": {},
 }
 

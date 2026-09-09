@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from . import hook
 from ._shared import (  # noqa: E402
     CONFIG_DIR, DATA_DIR, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0,
-    DEFAULT_M1, DEFAULT_POLICY, HOME,
+    DEFAULT_M1, DEFAULT_MAX_DELAY, DEFAULT_POLICY, HOME,
     LOG_PATH, POLICY_PATH, SETTINGS_PATH,
     MAX_STALE, STATE_PATH, WINDOW_SECONDS, bucket_pace, model_matches,
     norm_path, normalize_enforce, path_within,
@@ -847,7 +847,8 @@ def _watch_loop(interval):
         time.sleep(max(1, interval - rec["elapsed_ms"] / 1000))
 
 
-def cmd_on(path, model, m0, m1, fanout_reserve, enforce):
+def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
+           no_max_delay=False):
     pol = load_policy()
     key = norm_path(path)
     entry = pol["paths"].get(key, {})
@@ -862,6 +863,15 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce):
         entry["fanout_reserve"] = fanout_reserve
     if enforce is not None:
         entry["enforce"] = sorted(normalize_enforce(enforce))
+    if no_max_delay:
+        # An explicit null, not a pop. Popping would fall back to a
+        # defaults-level cap, so "turn it off" would silently leave one on
+        # wherever a default is configured. dict.get only fires its fallback on
+        # a MISSING key, so a stored null reads back as "no cap" -- the same
+        # missing-key-vs-falsy distinction the pace-line code depends on.
+        entry["max_delay"] = None
+    elif max_delay is not None:
+        entry["max_delay"] = max_delay
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
@@ -963,12 +973,15 @@ def cmd_status(path):
     m0 = entry.get("m0", dflt.get('m0', DEFAULT_M0))
     m1 = entry.get("m1", dflt.get('m1', DEFAULT_M1))
     chunk = entry.get("chunk", dflt.get("chunk", DEFAULT_CHUNK))
+    max_delay = entry.get("max_delay", dflt.get("max_delay", DEFAULT_MAX_DELAY))
     model = (entry.get("model") or "").lower()
     enforce = normalize_enforce(entry.get("enforce", dflt.get("enforce")))
     print(f"matched rule:   {matched}")
     print(f"  paced         {entry.get('paced', False)}")
     print(f"  model         {entry.get('model') or '<undeclared>'}")
     print(f"  m0 / m1       {m0} / {m1}")
+    print(f"  max_delay     "
+          f"{human_delta(max_delay) if max_delay is not None else 'no limit'}")
     print(f"  enforces      {', '.join(sorted(enforce))}")
 
     if not os.path.exists(STATE_PATH):
@@ -991,10 +1004,26 @@ def cmd_status(path):
     # rises at 0.60 %/h against the session line's 20 %/h, so the two produce
     # waits that differ by orders of magnitude -- and seeing all three is how
     # you decide whether the `--enforce` set is the one you want.
+    #
+    # "ENFORCED" has to mean acted on, not merely listed in `--enforce`. A
+    # folder switched off with `niceclaude off`, or a `global off`, still has
+    # its rule and its enforce set on file -- so reading the set alone printed
+    # ENFORCED/HOLDS for a folder the hook returns from immediately. The verdict
+    # line below said "not paced" while the table above it said the opposite,
+    # and the table is the part that gets scanned.
+    active = genabled and entry.get("paced", False)
+    if not active:
+        # Otherwise the rule block says `enforces session` two lines up while
+        # every row reads `ignored`, which looks like a bug rather than the
+        # switch being off.
+        why = "paced false" if genabled else "global.enabled false"
+        print(f"  ({why} -- nothing below is acted on; shown as it would be "
+              f"judged)")
     for k, b in st["buckets"].items():
-        enforced = ((k == "session" and "session" in enforce)
-                    or (k == "week:all models" and "week" in enforce)
-                    or ("model" in enforce and model_matches(k, model)))
+        enforced = active and (
+            (k == "session" and "session" in enforce)
+            or (k == "week:all models" and "week" in enforce)
+            or ("model" in enforce and model_matches(k, model)))
         mark = "ENFORCED" if enforced else "ignored "
         p = bucket_pace(b, now, m0, m1)
         if p is None:
@@ -1029,6 +1058,8 @@ def cmd_status(path):
     # this wait -- far more often than the wait itself is long. That is what
     # lets `global off` free an already-frozen agent within one chunk.
     nap = min(chunk, max(1.0, wake_at - now))
+    if max_delay is not None:
+        nap = max(1.0, min(nap, max_delay))
     if d.get("blind"):
         why = reason[len("BLIND: "):] if reason.startswith("BLIND: ") else reason
         print(f"right now:      BRAKED, blind -- {why}")
@@ -1039,13 +1070,31 @@ def cmd_status(path):
             print("                only actually holds here if that refresh fails.")
         print(f"                No release to solve for; it re-checks every "
               f"{human_delta(chunk)}.")
+        if max_delay is not None:
+            print(f"                max_delay caps the hold at "
+                  f"{human_delta(max_delay)}, then it proceeds anyway.")
     else:
         when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
         print(f"right now:      BRAKED -- {reason}")
-        print(f"                releases in {human_delta(wake_at - now)} ({when} "
-              f"local); next check in {human_delta(nap)}")
-        print("                That release is not a promise: every session draws on")
-        print("                the same account-wide budget, so it can move out.")
+        # With max_delay set the hook stops holding long before the line
+        # catches up, so reporting the solved release as the wait would
+        # overstate it by hours. Report what it will actually do.
+        if max_delay is not None and wake_at - now > max_delay:
+            print(f"                holds {human_delta(max_delay)} (max_delay), then "
+                  f"proceeds while still over")
+            print(f"                the line; the line itself clears in "
+                  f"{human_delta(wake_at - now)} ({when} local).")
+            print(f"                Each later tool call brakes again for up to "
+                  f"{human_delta(max_delay)}.")
+            print("                That clearing time is not a promise: every session")
+            print("                draws on the same account-wide budget, so it can")
+            print("                move out -- but the hold above is a timer and will")
+            print("                not.")
+        else:
+            print(f"                releases in {human_delta(wake_at - now)} ({when} "
+                  f"local); next check in {human_delta(nap)}")
+            print("                That release is not a promise: every session draws on")
+            print("                the same account-wide budget, so it can move out.")
 
     reserve = entry.get("fanout_reserve",
                         dflt.get("fanout_reserve", DEFAULT_FANOUT_RESERVE))
@@ -1251,6 +1300,13 @@ def main():
     o.add_argument("--m0", type=float); o.add_argument("--m1", type=float)
     o.add_argument("--fanout-reserve", type=float, dest="fanout_reserve",
                    help="extra reserve demanded of SubagentStart, on top of m1")
+    cap = o.add_mutually_exclusive_group()
+    cap.add_argument("--max-delay", type=float, dest="max_delay",
+                     help="cap one hold at this many seconds, then proceed while "
+                          "still over the line and brake again next tool call; "
+                          "keeps a wait shorter than the prompt cache TTL")
+    cap.add_argument("--no-max-delay", action="store_true", dest="no_max_delay",
+                     help="remove the cap: hold until the line catches up")
     o.add_argument("--enforce",
                    help="comma-separated windows to pace against: session, week, "
                         "model (default: all three)")
@@ -1294,7 +1350,8 @@ def main():
     if a.cmd == "stop":
         return cmd_stop()
     if a.cmd == "on":
-        return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce)
+        return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce,
+                      a.max_delay, a.no_max_delay)
     if a.cmd == "off":
         return cmd_off(a.path)
     if a.cmd == "global":
