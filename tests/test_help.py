@@ -8,6 +8,8 @@ for, and `help <command>` prints the same page as `<command> --help`, so the
 two ways in cannot drift apart.
 """
 
+import re
+
 import pytest
 
 from niceclaude import cli
@@ -62,7 +64,14 @@ def test_bare_help_prints_the_overview(capsys):
     assert (code, err) == (0, "")
     assert out.startswith("usage: niceclaude ")
     for name in command_names():
-        assert f"  {name} " in out, f"{name} missing from the overview"
+        # The name starts its own line in the list; whether its summary follows
+        # on that line or wraps to the next is argparse's call, not ours.
+        # Before 3.13 the column reserved for subcommand names was measured an
+        # indent level short, so the longest name -- `uninstall` -- overflowed
+        # it and the summary moved to the following line. Insisting on a
+        # summary here would test the formatter, not the overview.
+        assert re.search(rf"^ +{re.escape(name)}( |$)", out, re.M), (
+            f"{name} missing from the overview")
 
 
 def test_bare_help_matches_top_level_dash_dash_help(capsys):
