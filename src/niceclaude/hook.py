@@ -27,7 +27,7 @@ import time
 
 from ._shared import (
     DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1,
-    DEFAULT_MAX_DELAY, HOOK_LOG_PATH, MAX_BRAKE, bucket_pace, normalize_enforce,
+    DEFAULT_MAX_DELAY, HOOK_LOG_PATH, bucket_pace, normalize_enforce,
     MAX_STALE, POLICY_PATH, STATE_PATH, model_matches, norm_path, path_within,
 )
 
@@ -263,12 +263,6 @@ def run(cwd, event=None):
             was_blind = d.get("blind", False)
             log(f"brake* cwd={cwd} {d.get('reason', '')}")
 
-        # Give up after MAX_BRAKE. By then every window has rolled, so still
-        # holding would mean something is wrong with us, not with the budget.
-        if now - brake_start >= MAX_BRAKE:
-            return brake_start, ("MAX_BRAKE-timeout-WHILE-BLIND"
-                                 if d.get("blind") else "MAX_BRAKE-timeout")
-
         # A configured max_delay caps ONE hold, not the total wait. We release
         # while still over the line, the agent takes one more step, and the next
         # PreToolUse brakes again -- so the restraint survives, but it is applied
@@ -279,9 +273,12 @@ def run(cwd, event=None):
         # taken to save budget can end up costing more than it saved. Capping the
         # hold below the TTL keeps each wait cache-warm.
         #
-        # This is the one place the tool deliberately proceeds while over the
-        # line, blind included -- MAX_BRAKE above has the same escape. It is opt
-        # in, and off by default, precisely because it loosens the guarantee.
+        # This is now the ONLY place the tool deliberately proceeds while over
+        # the line, blind included. It is opt in, and off by default, precisely
+        # because it loosens the guarantee. Without it the hold ends only when
+        # the line catches up, the folder is unpaced, or the harness kills the
+        # hook at its registered timeout -- and that last one is silent, which
+        # is why an unmatched brake in hook.log means "timed out", not "hung".
         max_delay = d.get("max_delay")
         if max_delay is not None and now - brake_start >= max_delay:
             return brake_start, ("max_delay-release-WHILE-BLIND"

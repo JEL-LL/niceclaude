@@ -73,7 +73,14 @@ DEFAULT_FANOUT_RESERVE = 0
 DEFAULT_MAX_DELAY = None
 
 MAX_STALE = 180      # a snapshot older than this is not trusted
-MAX_BRAKE = 21600    # 6h; by then every window has certainly rolled
+
+# There is deliberately no self-imposed ceiling on a hold. There used to be
+# (MAX_BRAKE, 6h) on the reasoning that by then every window has rolled -- which
+# is false: the weekly and per-model weekly windows run seven days, and those
+# are exactly the ones that bind for days at a time. It also never once fired,
+# because `install` registers the hook at `timeout: 21600`, the same number, and
+# the harness clock starts ~0.2s earlier at spawn. The registered timeout is the
+# real ceiling; `max_delay` is the one you are meant to set.
 
 WINDOW_SECONDS = {"session": 5 * 3600, "week": 7 * 86400}
 

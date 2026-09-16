@@ -313,3 +313,77 @@ def test_cmd_on_leaves_max_delay_alone_when_not_given(tmp_path, monkeypatch,
         norm_path(str(target))]
     assert entry["max_delay"] == 90
     assert entry["model"] == "fable"
+
+
+# --- and nothing else caps a hold --------------------------------------------
+
+WEEK_WINDOW = 7 * 86400
+WEEK_RESETS = RESETS + 4 * 86400        # four days out, as a weekly bucket is
+
+
+def week_bucket(pct):
+    return {"pct": pct, "resets_epoch": WEEK_RESETS,
+            "window_seconds": WEEK_WINDOW, "label": "all models"}
+
+
+class StillHolding(Exception):
+    """The probe clock reached its target with run() still asleep."""
+
+
+class Probe(Clock):
+    """A clock that aborts the test once the hold outlives `stop_after`.
+
+    Asserting "it never releases" cannot be done by waiting for a return, so
+    invert it: run until the target and treat still being asleep as the pass.
+    """
+
+    def __init__(self, stop_after):
+        Clock.__init__(self, max_naps=100_000)
+        self.stop_after = stop_after
+
+    def sleep(self, seconds):
+        if self.elapsed >= self.stop_after:
+            raise StillHolding
+        Clock.sleep(self, seconds)
+
+
+def test_a_weekly_overage_holds_past_the_old_six_hour_ceiling(
+        cwd, tmp_path, monkeypatch):
+    """The hook imposes no ceiling of its own on a hold.
+
+    `MAX_BRAKE` used to release at 6h, justified as "by then every window has
+    rolled". The weekly and per-model weekly windows run seven days, so that was
+    false exactly when it mattered: a folder pinned by `week:Fable` was let
+    through every 6h while the budget it was over had days left. Worse, each
+    release came after a wait long enough to kill the prompt cache, so the one
+    step it bought re-read the whole context from cold.
+
+    The ceilings that remain are both deliberate -- `max_delay`, which the user
+    sets, and the registered hook timeout, which is the harness's.
+    """
+    policy_path = tmp_path / "policy.json"
+    state_path = tmp_path / "state.json"
+    policy_path.write_text(json.dumps(policy_for(cwd, {"paced": True})),
+                           encoding="utf-8")
+    state_path.write_text(
+        json.dumps(state_for({"week:all models": week_bucket(HOT_PCT)})),
+        encoding="utf-8")
+    monkeypatch.setattr(hook, "POLICY_PATH", str(policy_path))
+    monkeypatch.setattr(hook, "STATE_PATH", str(state_path))
+    monkeypatch.setattr(hook, "snapshot_age", lambda state, now: 10)
+    monkeypatch.setattr(hook, "log", lambda msg: None)
+
+    probe = Probe(stop_after=8 * 3600)      # past the old 6h ceiling
+    monkeypatch.setattr(hook.time, "time", probe.time)
+    monkeypatch.setattr(hook.time, "sleep", probe.sleep)
+
+    with pytest.raises(StillHolding):
+        hook.run(cwd)
+    assert probe.elapsed >= 8 * 3600
+
+    # And it is genuinely still over the line, not merely still looping.
+    d = hook.decide(policy_for(cwd, {"paced": True}),
+                    state_for({"week:all models": week_bucket(HOT_PCT)},
+                              now=probe.t),
+                    cwd, probe.t)
+    assert d["braked"] is True

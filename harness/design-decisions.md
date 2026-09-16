@@ -291,10 +291,17 @@ containing the model's name. See `platform-findings.md` §4.
 - Unparseable/missing snapshot → **brake** (the tool exists to prevent overspend).
 - Crash inside the hook → **fail open** and log. A bug must never wedge every
   session; problems should surface via `check` and `hook.log`.
-- Braked longer than `MAX_BRAKE` (6h) → release and log loudly. By then every
-  window has rolled, so continuing to hold means something is wrong with us, not
-  with the budget. A timeout release *while blind* is logged distinctly, because
-  it is the one release we cannot justify from data.
+- A long hold → **keep holding.** There is no self-imposed ceiling. `MAX_BRAKE`
+  (6h) used to be one, justified as "by then every window has rolled" — false,
+  since the weekly and per-model weekly windows run seven days and are precisely
+  the ones that bind for days. It also never fired once in 388 logged releases,
+  because `install` registers the hook at `timeout: 21600`, the identical number,
+  and the harness clock starts ~0.2s earlier at spawn. Two ceilings remain, and
+  both are deliberate: `max_delay`, which you set per folder, and the registered
+  timeout, which is the harness's. A release *while blind* is still logged
+  distinctly, because it is the one release we cannot justify from data.
+- The registered timeout kills the hook **silently** — the process dies before it
+  can log. So an unmatched `brake` in `hook.log` means "timed out", not "hung".
 - **Exception — a freshly rolled window.** After a reset the server omits the
   reset clause entirely (`Current session: 0% used`), so `f_t` is unknown. Naive
   fail-safe would brake *hardest at the moment headroom is greatest*. Instead,
