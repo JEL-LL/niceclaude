@@ -15,6 +15,17 @@ refactors and internal cleanups do not need a line at all.
 
 ### Added
 
+- `niceclaude plot` now draws the per-model weekly window -- `week:Fable` and
+  the like -- as its own panel, and as a third trace on the overlay. It was
+  parsed and collected all along, then dropped on the way to the figure,
+  because the panel list was hardcoded to session and `week:all models`. That
+  is the omission most likely to mislead: on the 26-day log this was found on,
+  `week:all models` never once crossed the line while `week:Fable` -- the
+  bucket governing the same work -- was above it 46% of the time and overshot
+  by 35 points. The plot showed two clean panels and no sign of the only
+  window in trouble. The bucket is matched by shape rather than by name, since
+  the label is a server-supplied display name, so a `week:Sonnet only` account
+  gets the same panel without a code change.
 - `niceclaude help <command>` prints a full page for one command: what it does
   and what it reads and writes, every argument with its default, and examples.
   It is the same page as `<command> --help`, which until now listed most flags

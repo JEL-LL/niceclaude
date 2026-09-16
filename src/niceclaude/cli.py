@@ -1575,6 +1575,14 @@ pace line, marking where it ran over. This answers the question the whole tool
 exists to serve: is consumption actually tracking the line, and when did it
 run hot?
 
+One panel per bucket `/usage` reports: the 5-hour session window, the shared
+weekly window, and the per-model weekly window for each model that has a limit
+of its own -- `week:Fable` and the like. That last one is usually the tightest
+of the three, so a plot without it can look comfortable while the line that
+actually brakes your agents is nearly spent. A final panel overlays every
+window on its own progress, where the diagonal IS the pace line and anything
+above it was over budget whichever window it came from.
+
 Requires matplotlib, which is an optional extra:
 
     uv tool install "niceclaude[plot]"

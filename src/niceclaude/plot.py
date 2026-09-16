@@ -15,19 +15,27 @@ from datetime import datetime, timezone
 
 from ._shared import DEFAULT_M0, DEFAULT_M1
 
-# From the validated reference palette. Single categorical slot (no adjacent
-# pairs to separate), a recessive neutral for the threshold, and a status colour
-# for the over-line region -- which carries a text label, never colour alone.
+# From the validated reference palette: the first three categorical slots, a
+# recessive neutral for the threshold, and a status colour for the over-line
+# region -- which carries a text label, never colour alone.
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_2 = "#52514e"
 MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
-SERIES_1 = "#2a78d6"   # categorical slot 1 -- utilization
-SERIES_2 = "#eb6834"   # categorical slot 2 -- second bucket in the headroom panel
+SERIES_1 = "#2a78d6"   # categorical slot 1 -- blue
+SERIES_2 = "#eb6834"   # categorical slot 2 -- orange
+SERIES_3 = "#1baf7a"   # categorical slot 3 -- aqua
 CRITICAL = "#d03b3b"   # status -- over the line
 GOOD = "#0ca30c"
+
+# Fixed order, never cycled: a bucket keeps its hue no matter how many buckets
+# the log happens to hold. Three is also the documented cap for a chart where
+# every pair of series can be compared directly -- which the overlay panel is,
+# since all its traces share one pair of axes. The per-bucket panels above it
+# are the facets that carry anything past the third.
+PALETTE = (SERIES_1, SERIES_2, SERIES_3)
 
 RESET_JITTER = 120
 
@@ -74,6 +82,48 @@ def _allowed(p, m0, m1):
     return m0 + ft * (100 - m0 - m1)
 
 
+def per_model_keys(series):
+    """The per-model weekly buckets in a log, in a stable order.
+
+    `/usage` prints one of these only for a model that has a limit of its own,
+    and names it with a server-supplied display name -- "week:Fable" on this
+    account, "week:Sonnet only" on a max subscription -- so unlike
+    "week:all models" the key cannot be written down in advance. Anything
+    weekly that is not the shared bucket is model-scoped by construction,
+    which is the rule `model_matches` already applies in the hook.
+    """
+    out = []
+    for key in series:
+        low = key.lower()
+        if low.startswith("week:") and low[len("week:"):].strip() != "all models":
+            out.append(key)
+    return sorted(out, key=str.lower)
+
+
+def panels_for(series):
+    """Which buckets get a panel, in draw order.
+
+    The per-model weekly bucket belongs here because it is routinely the line
+    that actually binds: on the log this was written against, week:Fable stood
+    at 54% while the shared weekly bucket enclosing it read 29%. Drawing only
+    the shared bucket hides the constraint that stops the work, and leaves the
+    plot disagreeing with what `status` prices.
+    """
+    return ([k for k in ("session", "week:all models") if k in series]
+            + per_model_keys(series))
+
+
+def _slot(i):
+    """Hue for panel `i`, or a neutral once the fixed order is exhausted.
+
+    Cycling back to slot 1 for a fourth bucket would paint two different
+    buckets the same blue, which is the one thing a fixed categorical order
+    exists to prevent. A bucket past the order keeps its identity from its
+    panel title instead, and is left off the overlay.
+    """
+    return PALETTE[i] if i < len(PALETTE) else INK_2
+
+
 def collect(records, parse_usage):
     """records -> {bucket_key: [sample dicts sorted by time]}"""
     series = {}
@@ -107,7 +157,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
               '  uv tool install "niceclaude[plot]"', file=sys.stderr)
         return 1
 
-    panels = [k for k in ("session", "week:all models") if k in series]
+    panels = panels_for(series)
     if not panels:
         print("no plottable buckets in the log", file=sys.stderr)
         return 1
@@ -136,7 +186,8 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
         ax.tick_params(colors=MUTED, labelsize=9)
 
     stats, windows = {}, {}
-    for ax, key in zip(axes, panels):
+    for idx, (ax, key) in enumerate(zip(axes, panels)):
+        colour = _slot(idx)
         pts = series[key]
         over_count = total = idle = 0
         worst = 0.0
@@ -145,7 +196,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
         for seg in _segments(pts):
             xs = [dt(p["ts_epoch"]) for p in seg]
             ys = [p["pct"] for p in seg]
-            ax.plot(xs, ys, color=SERIES_1, lw=2.0, zorder=4,
+            ax.plot(xs, ys, color=colour, lw=2.0, zorder=4,
                     solid_capstyle="round")
 
             # A window that was never started has no resets_at, so no pace line
@@ -204,7 +255,13 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
     norm_ax.annotate("the pace line", xy=(72, (m0 + (100 - m1)) * 0.5 - 2),
                      color=INK_2, fontsize=9, rotation=26, va="top")
 
-    for key, colour, label in zip(panels, (SERIES_1, SERIES_2), panels):
+    # Sliced, not zipped against the palette: zip() would drop the extra bucket
+    # silently, and a bucket vanishing from a budget chart is the failure this
+    # whole change was made to fix.
+    overlaid = panels[:len(PALETTE)]
+    omitted = panels[len(PALETTE):]
+    for idx, key in enumerate(overlaid):
+        colour = _slot(idx)
         drawn = 0
         for run in windows.get(key, []):
             if len(run) < 2:
@@ -214,18 +271,30 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
                 # invert allowed() back to window progress
                 fx.append(100.0 * (a - m0) / (100 - m0 - m1))
                 fy.append(y)
-            norm_ax.plot(fx, fy, color=colour, lw=1.8, alpha=0.75, zorder=4,
-                         solid_capstyle="round",
-                         label=label if drawn == 0 else None)
+            # Later buckets draw on top. A 26-day log holds well over a
+            # hundred 5-hour session windows against three weekly ones, so
+            # without this the weekly traces -- the ones that actually bind --
+            # are laid under a hairball of session lines and cannot be read.
+            norm_ax.plot(fx, fy, color=colour, lw=1.8, alpha=0.75,
+                         zorder=4 + idx, solid_capstyle="round",
+                         label=key if drawn == 0 else None)
             drawn += 1
     norm_ax.set_xlim(0, 100)
     norm_ax.set_ylim(0, 100)
     norm_ax.set_xlabel("% through the window", color=INK_2, fontsize=10)
     norm_ax.set_ylabel("% of budget used", color=INK_2, fontsize=10)
     chrome(norm_ax, "Every live window, overlaid on window progress")
-    leg = norm_ax.legend(frameon=False, loc="lower right", fontsize=10)
-    for t in leg.get_texts():
-        t.set_color(INK_2)
+    # A log in which no bucket ever carried a reset clause labels nothing, and
+    # legend() then warns on an empty call rather than drawing anything.
+    if norm_ax.get_legend_handles_labels()[0]:
+        # Opaque, because the corner it sits in is full of traces: this legend
+        # is the only thing tying a hue back to a bucket name, so it cannot be
+        # the part of the figure that is hardest to read.
+        leg = norm_ax.legend(loc="lower right", fontsize=10, frameon=True,
+                             facecolor=SURFACE, edgecolor=GRID, framealpha=1.0)
+        leg.set_zorder(10)
+        for t in leg.get_texts():
+            t.set_color(INK_2)
 
     span_h = (series[panels[0]][-1]["ts_epoch"] - series[panels[0]][0]["ts_epoch"]) / 3600
     fig.suptitle(
@@ -239,4 +308,8 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
         pc = 100.0 * over / total if total else 0.0
         print(f"  {key:22} {over}/{total} live samples over the line ({pc:.1f}%), "
               f"worst overshoot {worst:.1f} pts; {idle} samples with no window running")
+    if omitted:
+        print(f"  note: {', '.join(omitted)} {'has' if len(omitted) == 1 else 'have'} "
+              f"a panel but no trace on the overlay -- the fixed colour order "
+              f"stops at {len(PALETTE)}")
     return 0
