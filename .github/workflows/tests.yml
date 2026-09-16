@@ -22,7 +22,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.11", "3.13"]
+        # Every supported minor, not just the ends: requires-python is
+        # >=3.11, so 3.12 gets a job rather than being assumed to behave
+        # like a neighbour. It does not always: the argparse help-column
+        # change behind the test_help failure landed in 3.12, leaving 3.11
+        # alone on the old layout -- which the ends-only matrix could not
+        # have told us.
+        python: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4

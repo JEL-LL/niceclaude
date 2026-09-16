@@ -66,7 +66,7 @@ def test_bare_help_prints_the_overview(capsys):
     for name in command_names():
         # The name starts its own line in the list; whether its summary follows
         # on that line or wraps to the next is argparse's call, not ours.
-        # Before 3.13 the column reserved for subcommand names was measured an
+        # Before 3.12 the column reserved for subcommand names was measured an
         # indent level short, so the longest name -- `uninstall` -- overflowed
         # it and the summary moved to the following line. Insisting on a
         # summary here would test the formatter, not the overview.
