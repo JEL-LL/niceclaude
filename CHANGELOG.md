@@ -15,6 +15,17 @@ refactors and internal cleanups do not need a line at all.
 
 ### Added
 
+- `niceclaude plot --days N` plots only the tail of the log -- `--days 7` for
+  the last week, `--days 30` for the last month, fractions allowed. The whole
+  log stays the default, but on a long-running daemon that grows unreadable: a
+  month holds over a hundred five-hour session windows on one axis. The count
+  runs back from the newest sample rather than from now, which is the same
+  instant while `watch` is running and the more useful of the two once a log
+  has gone stale -- `--days 7` on a log that stopped a month ago draws that
+  log's last week instead of an empty figure. Clipping happens before parsing,
+  so `--days 1` reads 82 records rather than 10856. Zero, negative and
+  non-numeric values are refused by the parser instead of quietly drawing
+  nothing.
 - `niceclaude plot` now draws the per-model weekly window -- `week:Fable` and
   the like -- as its own panel, and as a third trace on the overlay. It was
   parsed and collected all along, then dropped on the way to the figure,

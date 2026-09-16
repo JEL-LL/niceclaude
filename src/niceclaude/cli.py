@@ -1583,11 +1583,31 @@ actually brakes your agents is nearly spent. A final panel overlays every
 window on its own progress, where the diagonal IS the pace line and anything
 above it was over budget whichever window it came from.
 
+`--days N` plots only the tail of the log: `--days 7` for the last week,
+`--days 30` for the last month, fractions allowed (`--days 0.5` is twelve
+hours). The whole log is the default, which on a long-running daemon is
+eventually too wide to read -- a month of five-hour session windows is over a
+hundred of them on one axis.
+
+The count is back from the NEWEST SAMPLE, not back from now. Those are the
+same instant whenever `watch` is running. They differ once a log has gone
+stale, and there this is the more useful of the two: `--days 7` on a log that
+stopped a month ago draws that log's last week rather than an empty figure.
+Either way the x-axis is dated and the title carries the span, so you can see
+which one you are looking at.
+
 Requires matplotlib, which is an optional extra:
 
     uv tool install "niceclaude[plot]"
 
 The daemon and the hook never import it, so nothing else pays for it.
+""",
+        examples="""examples:
+  niceclaude plot                       # the whole log
+  niceclaude plot --days 7              # the last week
+  niceclaude plot --days 30 -o month.png
+  niceclaude plot --days 1 --m0 10      # redraw a day against a line
+                                        # you are considering
 """),
 
     "help": dict(
@@ -1607,6 +1627,25 @@ examples:
   niceclaude help status
 """),
 }
+
+
+def positive_days(text):
+    """argparse type for --days: a number of days greater than zero.
+
+    Unvalidated, `--days 0` would clip the log to the single newest sample and
+    a negative would clip it to nothing, and either draws a figure that is
+    empty rather than an error that says why. This tool's whole failure mode is
+    being silently wrong about how much budget was spent, so the arguments that
+    decide what gets counted refuse nonsense up front.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text}")
+    if value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be more than 0 days, got {text}")
+    return value
 
 
 def _command(sub, name):
@@ -1712,6 +1751,11 @@ def build_parser():
     pl.add_argument("-o", "--out", default="niceclaude-usage.png",
                     metavar="FILE",
                     help="where to write the image (default: %(default)s)")
+    pl.add_argument("--days", type=positive_days, default=None, metavar="DAYS",
+                    help="plot only the last DAYS days of the log, counted "
+                         "back from the newest sample rather than from now "
+                         "(default: the whole log). Fractions are allowed: "
+                         "--days 0.5 is the last twelve hours")
     pl.add_argument("--m0", type=float, default=DEFAULT_M0, metavar="PCT",
                     help="m0 of the line to draw (default: %(default)s). "
                          "Drawing only; the policy is unchanged")
@@ -1782,7 +1826,13 @@ def main(argv=None):
         return cmd_burn(a.bin_minutes)
     if a.cmd == "plot":
         from . import plot as plotmod
-        series = plotmod.collect(load_log(), parse_usage)
+        records = load_log()
+        kept = plotmod.clip(records, a.days)
+        if len(kept) < len(records):
+            unit = "day" if a.days == 1 else "days"
+            print(f"  plotting {len(kept)} of {len(records)} samples "
+                  f"-- the last {a.days:g} {unit} of the log")
+        series = plotmod.collect(kept, parse_usage)
         return plotmod.render(series, a.out, a.m0, a.m1)
     return 1
 

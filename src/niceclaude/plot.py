@@ -124,6 +124,33 @@ def _slot(i):
     return PALETTE[i] if i < len(PALETTE) else INK_2
 
 
+def clip(records, days):
+    """Keep the last `days` days of a log. None keeps all of it.
+
+    Anchored on the newest sample, not on the wall clock. While `watch` runs
+    those are the same instant; they diverge only once the log has gone stale,
+    and there "the last week of the record" is what someone asking for a week
+    wants, while "the last week of wall time" is an empty figure. It also means
+    a positive --days can never empty a log that had anything in it, so the one
+    remaining way to reach "nothing to plot" is the way that always existed: a
+    log with no samples. Which view you are looking at stays legible either
+    way, because the x-axis is dated and the title carries the span.
+
+    Clipping happens before collect() rather than after, so the regex in
+    parse_usage never runs over the records being thrown away -- on the log
+    this was written against, `--days 1` parses 82 records instead of 10856.
+    """
+    if days is None:
+        return records
+    newest = max((r["ts_epoch"] for r in records
+                  if r.get("exit_code") == 0 and r.get("ts_epoch") is not None),
+                 default=None)
+    if newest is None:                  # nothing usable; let collect say so
+        return records
+    cutoff = newest - days * 86400
+    return [r for r in records if (r.get("ts_epoch") or 0) >= cutoff]
+
+
 def collect(records, parse_usage):
     """records -> {bucket_key: [sample dicts sorted by time]}"""
     series = {}
