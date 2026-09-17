@@ -417,9 +417,27 @@ To size one against a run you already have rather than by arithmetic:
 niceclaude plot --days 7 --band 2
 ```
 
-`plot`'s `--band` — like its `--m0` and `--m1` — is drawing only. It shades the
-band onto the log you already recorded and changes no policy, so you can try a
-number against last week before pacing anything with it. Time in the shaded
+With no geometry flags at all, `plot` draws the line the **current folder is
+actually paced against**: the `m0`, `m1` and `band` of the rule covering it,
+falling back to `defaults` for anything that rule does not set, resolved
+exactly the way `status` resolves them. A bare `niceclaude plot` therefore
+grades a run against the line that governed it rather than against the
+built-in 5/8/0, which is what it used to do — a folder paced with a band saw
+its band missing from its own chart. The line it took is printed before it
+draws:
+
+```
+  line: m0=5, m1=8, band=2  (from rule /home/you/projects/nightly)
+```
+
+Where no rule covers the folder it says so and uses the policy defaults, and
+any flag you pass is named on that line too, so you can always tell which
+numbers were yours.
+
+`plot`'s `--band` — like its `--m0` and `--m1` — overrides that default and is
+drawing only. It shades the band onto the log you already recorded and changes
+no policy, so you can try a number against last week before pacing anything
+with it. Time in the shaded
 strip is time that would have been spent in the lower gear, cache-warm and still
 under the guarantee. Too thin and the trace keeps punching through to the brake
 line; too fat and it never leaves the band.

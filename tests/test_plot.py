@@ -22,7 +22,9 @@ from datetime import datetime, timezone
 import pytest
 
 from niceclaude import cli
-from niceclaude._shared import bucket_pace
+from niceclaude._shared import (
+    DEFAULT_BAND, DEFAULT_M0, DEFAULT_M1, bucket_pace, norm_path,
+)
 from niceclaude.plot import (
     PALETTE, _draw_overlay_band, _draw_window, _pace, _slot, clip, collect,
     panels_for, per_model_keys, render,
@@ -330,3 +332,189 @@ def test_a_figure_with_a_band_renders(tmp_path):
     out = tmp_path / "band.png"
     assert render(series, str(out), 5, 8, 3) == 0
     assert out.stat().st_size > 0
+
+
+# --- the line the figure defaults to -----------------------------------------
+#
+# `plot` used to draw every log against the built-in 5/8/0 no matter how the
+# folder was actually paced, so a run held to a configured line was graded
+# against a line that was never in force -- the plot calling samples over
+# budget that the hook had let through, or the reverse. The default now comes
+# from the same place `status` reads, and the flags override it.
+
+@pytest.fixture
+def policy(tmp_path, monkeypatch):
+    """A redirected policy file, and a folder that `plot` will think it is in.
+
+    cwd is faked rather than actually changed: geometry_for asks os.getcwd(),
+    and a chdir would leak into the rest of the session.
+    """
+    monkeypatch.setattr(cli, "POLICY_PATH", str(tmp_path / "policy.json"))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(cli.os, "getcwd", lambda: str(proj))
+
+    def write(paths=None, defaults=None):
+        cli.save_policy({"global": {"enabled": True},
+                         "defaults": defaults if defaults is not None else {},
+                         "paths": paths or {}})
+
+    return proj, write
+
+
+def rule(proj, **fields):
+    return {norm_path(str(proj)): dict(paced=True, **fields)}
+
+
+def test_the_folders_own_rule_supplies_the_line(policy):
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3, band=4))
+    matched, m0, m1, band = cli.geometry_for(str(proj))
+    assert matched == norm_path(str(proj))
+    assert (m0, m1, band) == (12, 3, 4)
+
+
+def test_a_rule_inherits_what_it_does_not_set(policy):
+    """A rule naming only m0 must not drag the other two back to the built-in
+    constants: the policy defaults sit between them, and that middle layer is
+    what the hook itself reads."""
+    proj, write = policy
+    write(paths=rule(proj, m0=12), defaults={"m1": 3, "band": 4})
+    _matched, m0, m1, band = cli.geometry_for(str(proj))
+    assert (m0, m1, band) == (12, 3, 4)
+
+
+def test_a_subfolder_inherits_the_rule_above_it(policy):
+    """The same longest-prefix resolution `status` uses -- plot must not have
+    its own idea of which rule covers a folder."""
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3))
+    sub = proj / "src" / "deep"
+    sub.mkdir(parents=True)
+    matched, m0, m1, _band = cli.geometry_for(str(sub))
+    assert matched == norm_path(str(proj))
+    assert (m0, m1) == (12, 3)
+
+
+def test_an_uncovered_folder_still_gets_the_policy_defaults(policy):
+    """Not paced, so nothing is in force -- but the defaults are the numbers a
+    rule written here would inherit, and the log in front of you was recorded
+    on a machine configured with them."""
+    proj, write = policy
+    write(paths={}, defaults={"m0": 12, "m1": 3, "band": 4})
+    matched, m0, m1, band = cli.geometry_for(str(proj))
+    assert matched is None
+    assert (m0, m1, band) == (12, 3, 4)
+
+
+def test_an_empty_policy_falls_all_the_way_to_the_built_ins(policy):
+    proj, write = policy
+    write()
+    _matched, m0, m1, band = cli.geometry_for(str(proj))
+    assert (m0, m1, band) == (DEFAULT_M0, DEFAULT_M1, DEFAULT_BAND)
+
+
+def test_a_null_band_reads_as_no_band(policy):
+    """`on --no-band-delay` writes explicit nulls, so a hand-edited null band
+    is reachable. It means what 0 means to every reader of this line, and
+    render clamps it that way -- formatting a None as a number would crash."""
+    proj, write = policy
+    write(rule(proj, band=None))
+    assert cli.geometry_for(str(proj))[3] == 0
+
+
+def test_status_and_plot_read_the_same_three(policy):
+    """The guarantee the shared reader exists for: a chart that grades a run
+    against a different line than `status` prices is worse than no chart."""
+    proj, write = policy
+    write(paths=rule(proj, m0=12), defaults={"m1": 3, "band": 4})
+    pol = cli.load_policy()
+    _matched, entry = cli.resolve(pol, norm_path(str(proj)))
+    assert cli.line_geometry(pol, entry) == cli.geometry_for(str(proj))[1:]
+
+
+# --- the flags still win -----------------------------------------------------
+
+def test_the_geometry_flags_default_to_unset():
+    """None, not the built-in constants: it is the only way to tell "the user
+    asked for m0=5" from "the user asked for nothing" once the default is a
+    folder's configuration rather than a literal."""
+    ap, _sub = cli.build_parser()
+    a = ap.parse_args(["plot"])
+    assert (a.m0, a.m1, a.band) == (None, None, None)
+    a = ap.parse_args(["plot", "--m0", "12", "--band", "4"])
+    assert (a.m0, a.m1, a.band) == (12.0, None, 4.0)
+
+
+@pytest.fixture
+def drawn(monkeypatch):
+    """Run cmd_plot against a stubbed renderer and report the line it asked
+    for. The log is stubbed empty too: what is under test is which numbers
+    reach render, not what they draw."""
+    from niceclaude import plot as plotmod
+    calls = []
+    monkeypatch.setattr(cli, "load_log", lambda: [])
+    monkeypatch.setattr(plotmod, "render",
+                        lambda series, out, m0, m1, band:
+                        calls.append((m0, m1, band)) or 0)
+
+    def run(**kw):
+        args = dict(out="x.png", days=None, m0=None, m1=None, band=None)
+        args.update(kw)
+        assert cli.cmd_plot(**args) == 0
+        return calls[-1]
+
+    return run
+
+
+def test_with_no_flags_the_figure_takes_the_folders_line(policy, drawn):
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3, band=4))
+    assert drawn() == (12, 3, 4)
+
+
+def test_a_flag_overrides_only_itself(policy, drawn):
+    """--m0 redraws against an m0 you are considering; it must not also reset
+    the band you are actually paced with, or the run is being compared against
+    two changes at once."""
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3, band=4))
+    assert drawn(m0=20) == (20, 3, 4)
+
+
+def test_a_zero_flag_is_an_override_not_an_absence(policy, drawn):
+    """What a None default buys: `--band 0` asks for the brake line alone, and
+    is falsy, so `or` would have silently restored the configured band."""
+    proj, write = policy
+    write(rule(proj, band=4))
+    assert drawn(band=0)[2] == 0
+
+
+def test_the_line_it_took_is_printed_before_it_draws(policy, drawn, capsys):
+    """The default now lives in a file the reader cannot see from the command
+    line, so the run has to say whose line the figure was drawn against."""
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3, band=4))
+    drawn(band=2)
+    out = capsys.readouterr().out
+    assert "m0=12, m1=3, band=2" in out
+    assert norm_path(str(proj)) in out          # which rule it came from
+    assert "--band from the command line" in out
+
+
+def test_a_fully_overridden_line_credits_no_rule(policy, drawn, capsys):
+    """With all three given the rule supplied nothing, and saying otherwise
+    would send a reader to a policy file to explain numbers they typed."""
+    proj, write = policy
+    write(rule(proj, m0=12, m1=3, band=4))
+    assert drawn(m0=20, m1=5, band=1) == (20, 5, 1)
+    out = capsys.readouterr().out
+    assert "all from the command line" in out
+    assert "rule" not in out
+
+
+def test_an_uncovered_folder_says_so(policy, drawn, capsys):
+    proj, write = policy
+    write(paths={})
+    drawn()
+    assert "no rule covers this folder" in capsys.readouterr().out

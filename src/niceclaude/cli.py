@@ -377,6 +377,39 @@ def resolve(pol, path):
     return best[1], pol["paths"][best[1]]
 
 
+def line_geometry(pol, entry):
+    """The (m0, m1, band) a rule is actually paced against.
+
+    The rule's own value, else the policy defaults, else the built-in. Read in
+    one place because `plot` now draws this line by default, and a chart drawn
+    against different numbers than `status` prices is the same failure as a
+    plot carrying its own copy of the pace algebra: a budget chart that
+    disagrees with the controller is worse than no chart.
+    """
+    dflt = pol.get("defaults", {})
+    entry = entry or {}
+    return (entry.get("m0", dflt.get("m0", DEFAULT_M0)),
+            entry.get("m1", dflt.get("m1", DEFAULT_M1)),
+            # Normalized here rather than at each caller: a hand-written null
+            # means the same thing to every reader of this line as 0 does, and
+            # render() clamps it that way regardless.
+            entry.get("band", dflt.get("band", DEFAULT_BAND)) or 0)
+
+
+def geometry_for(path):
+    """The line in force for a folder: (matched rule or None, m0, m1, band).
+
+    matched is None when no rule covers the folder, which means it is not
+    paced at all. The geometry returned is still the policy defaults rather
+    than the built-in constants, because those are the numbers a rule written
+    here would inherit -- and a log recorded on this machine was recorded
+    under them.
+    """
+    pol = load_policy()
+    matched, entry = resolve(pol, norm_path(path))
+    return (matched,) + line_geometry(pol, entry)
+
+
 # --- assertions --------------------------------------------------------------
 
 def load_log():
@@ -1019,11 +1052,9 @@ def cmd_status(path):
         print("matched rule:   <none>  -> NOT paced")
         return 0
     dflt = pol.get("defaults", {})
-    m0 = entry.get("m0", dflt.get('m0', DEFAULT_M0))
-    m1 = entry.get("m1", dflt.get('m1', DEFAULT_M1))
+    m0, m1, band = line_geometry(pol, entry)
     chunk = entry.get("chunk", dflt.get("chunk", DEFAULT_CHUNK))
     max_delay = entry.get("max_delay", dflt.get("max_delay", DEFAULT_MAX_DELAY))
-    band = entry.get("band", dflt.get("band", DEFAULT_BAND))
     band_delay = entry.get("band_delay",
                            dflt.get("band_delay", DEFAULT_BAND_DELAY))
     # One hold inside the band costs band_delay, except where max_delay is
@@ -1345,6 +1376,44 @@ def cmd_burn(bin_minutes):
                   f"of wall clock")
         print()
     return 0
+
+
+def cmd_plot(out, days, m0, m1, band):
+    """Draw the log against a pace line -- this folder's, unless overridden.
+
+    The three geometry arguments arrive as None when the flag was not given,
+    which is the only way to tell "the user asked for m0=5" from "the user
+    asked for nothing" once the default stopped being a constant.
+    """
+    from . import plot as plotmod
+    here = norm_path(os.getcwd())
+    matched, pm0, pm1, pband = geometry_for(here)
+    given = [f"--{name}" for name, v in (("m0", m0), ("m1", m1),
+                                         ("band", band)) if v is not None]
+    m0 = pm0 if m0 is None else m0
+    m1 = pm1 if m1 is None else m1
+    band = pband if band is None else band
+    # Said out loud, because the default now comes from a file the reader
+    # cannot see from here. A figure drawn against some other folder's line is
+    # exactly the quiet wrongness this tool exists to catch, so it names whose
+    # line it took before it draws anything.
+    if len(given) == 3:
+        # Naming a rule here would credit it with numbers it did not supply.
+        source = "all from the command line"
+    else:
+        source = (f"from rule {matched}" if matched else
+                  "from the policy defaults -- no rule covers this folder")
+        if given:
+            source += f", {', '.join(given)} from the command line"
+    print(f"  line: m0={m0:g}, m1={m1:g}, band={band:g}  ({source})")
+    records = load_log()
+    kept = plotmod.clip(records, days)
+    if len(kept) < len(records):
+        unit = "day" if days == 1 else "days"
+        print(f"  plotting {len(kept)} of {len(records)} samples "
+              f"-- the last {days:g} {unit} of the log")
+    series = plotmod.collect(kept, parse_usage)
+    return plotmod.render(series, out, m0, m1, band)
 
 
 def cmd_list():
@@ -1751,10 +1820,18 @@ sat there is the quickest read on whether a band is sized right. Too thin and
 the trace keeps punching through to the brake line; too fat and it never leaves
 the band at all.
 
-All of `--m0`, `--m1` and `--band` are drawing only: they redraw the log
-against a line you are CONSIDERING, and change no policy. That is the point of
-them -- size a band against the run you already have, before you pace anything
-with it.
+The line drawn by default is the one in force for the CURRENT FOLDER: the m0,
+m1 and band of the rule covering it, falling back to the policy defaults for
+anything that rule does not set, and to those defaults alone where no rule
+covers it at all. It is the same geometry `status` prices here, read from the
+same place, so the chart and the verdict cannot drift apart. The line taken is
+printed before the figure is drawn, and the figure's title carries the numbers
+either way.
+
+All of `--m0`, `--m1` and `--band` override that: they redraw the log against
+a line you are CONSIDERING, and change no policy. That is the point of them --
+size a band against the run you already have, before you pace anything with
+it.
 
 Requires matplotlib, which is an optional extra:
 
@@ -1763,7 +1840,8 @@ Requires matplotlib, which is an optional extra:
 The daemon and the hook never import it, so nothing else pays for it.
 """,
         examples="""examples:
-  niceclaude plot                       # the whole log
+  niceclaude plot                       # the whole log, drawn against this
+                                        # folder's own m0/m1/band
   niceclaude plot --days 7              # the last week
   niceclaude plot --days 30 -o month.png
   niceclaude plot --days 1 --m0 10      # redraw a day against a line
@@ -1942,16 +2020,19 @@ def build_parser():
                          "back from the newest sample rather than from now "
                          "(default: the whole log). Fractions are allowed: "
                          "--days 0.5 is the last twelve hours")
-    pl.add_argument("--m0", type=float, default=DEFAULT_M0, metavar="PCT",
-                    help="m0 of the line to draw (default: %(default)s). "
-                         "Drawing only; the policy is unchanged")
-    pl.add_argument("--m1", type=float, default=DEFAULT_M1, metavar="PCT",
-                    help="m1 of the line to draw (default: %(default)s). "
-                         "Drawing only; the policy is unchanged")
-    pl.add_argument("--band", type=float, default=DEFAULT_BAND, metavar="PCT",
+    pl.add_argument("--m0", type=float, default=None, metavar="PCT",
+                    help="m0 of the line to draw (default: the m0 in force "
+                         "for the current folder). Drawing only; the policy "
+                         "is unchanged")
+    pl.add_argument("--m1", type=float, default=None, metavar="PCT",
+                    help="m1 of the line to draw (default: the m1 in force "
+                         "for the current folder). Drawing only; the policy "
+                         "is unchanged")
+    pl.add_argument("--band", type=float, default=None, metavar="PCT",
                     help="draw the throttle line this far under the brake "
-                         "line, and shade between them (default: "
-                         "%(default)s, which draws the brake line alone). "
+                         "line, and shade between them (default: the band in "
+                         "force for the current folder, which is 0 -- the "
+                         "brake line alone -- unless one is configured). "
                          "Drawing only; the policy is unchanged")
     h = _command(sub, "help")
     which = h.add_argument("command", nargs="?", metavar="command",
@@ -2017,15 +2098,7 @@ def main(argv=None):
     if a.cmd == "burn":
         return cmd_burn(a.bin_minutes)
     if a.cmd == "plot":
-        from . import plot as plotmod
-        records = load_log()
-        kept = plotmod.clip(records, a.days)
-        if len(kept) < len(records):
-            unit = "day" if a.days == 1 else "days"
-            print(f"  plotting {len(kept)} of {len(records)} samples "
-                  f"-- the last {a.days:g} {unit} of the log")
-        series = plotmod.collect(kept, parse_usage)
-        return plotmod.render(series, a.out, a.m0, a.m1, a.band)
+        return cmd_plot(a.out, a.days, a.m0, a.m1, a.band)
     return 1
 
 

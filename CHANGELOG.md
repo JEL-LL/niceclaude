@@ -13,6 +13,23 @@ refactors and internal cleanups do not need a line at all.
 
 ## Unreleased
 
+### Changed
+
+- **`plot` defaults to the line the folder is actually paced against.** With
+  no `--m0`, `--m1` or `--band`, the figure is now drawn against the geometry
+  of the rule covering the current directory — falling back to `defaults`, and
+  resolved through the same reader `status` uses, so the chart and the verdict
+  cannot drift apart. It used to draw every log against the built-in 5/8/0
+  regardless, which meant a folder paced with a band got a chart with no band
+  on it, and a folder paced with custom margins was graded against a line that
+  was never in force.
+
+  The flags still win, still override only themselves, and are still drawing
+  only. `plot` prints the line it took, and which parts of it came from the
+  command line, before it draws anything. If your folder is paced at the
+  defaults — or is not paced at all and your `defaults` block is untouched —
+  the figure is identical to before.
+
 ### Added
 
 - **A second pace line.** `--band PCT` draws a *throttle line* that far under
