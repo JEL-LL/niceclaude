@@ -8,8 +8,12 @@ samples) while week:Fable, the bucket actually governing the same work, sat
 above it 46% of the time and overshot by 35 points. The plot said everything
 was fine because the only bucket in trouble was the one it did not draw.
 
-Nothing here imports matplotlib. Panel selection is the part that was wrong, it
-is pure, and the optional extra must not decide whether the suite can check it.
+Almost nothing here imports matplotlib. Panel selection is the part that was
+wrong, it is pure, and the optional extra must not decide whether the suite can
+check it; the band tests below use a recording stand-in for an Axes for the
+same reason, since what has to be proven is which strokes are asked for rather
+than how they rasterize. Exactly one test needs a real figure, and skips
+without one.
 """
 
 import argparse
@@ -18,8 +22,10 @@ from datetime import datetime, timezone
 import pytest
 
 from niceclaude import cli
+from niceclaude._shared import bucket_pace
 from niceclaude.plot import (
-    PALETTE, _slot, clip, collect, panels_for, per_model_keys,
+    PALETTE, _draw_overlay_band, _draw_window, _pace, _slot, clip, collect,
+    panels_for, per_model_keys, render,
 )
 
 NOW = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -210,3 +216,117 @@ def test_days_refuses_a_window_that_holds_nothing(text):
 def test_days_refuses_a_non_number(text):
     with pytest.raises(argparse.ArgumentTypeError):
         cli.positive_days(text)
+
+
+# --- the throttle band -------------------------------------------------------
+
+WEEK = 7 * DAY
+
+
+def sample(ts, pct, resets=WEEK, window=WEEK):
+    return {"ts_epoch": ts, "pct": pct, "resets_epoch": resets,
+            "window_seconds": window}
+
+
+class FakeAx:
+    """Enough of an Axes to record what the drawing helpers ask it for."""
+
+    def __init__(self):
+        self.plots, self.fills = [], []
+
+    def plot(self, xs, ys, **kw):
+        self.plots.append((list(xs), list(ys), kw))
+
+    def fill_between(self, xs, lo, hi, **kw):
+        self.fills.append((list(xs), list(lo), list(hi), kw))
+
+
+# x, y, allowed, low -- one window's worth of what render() collects
+RUN = [(0, 10.0, 12.0, 8.0), (1, 30.0, 20.0, 16.0)]
+
+
+def test_the_drawn_lines_are_the_hook_s_own_arithmetic():
+    """The plot must not carry a second copy of the pace geometry. It used to
+    carry its own brake line, and a chart that disagrees with the controller
+    it is drawn to explain is worse than no chart."""
+    p = sample(WEEK // 3, 12.0)
+    truth = bucket_pace(p, p["ts_epoch"], 5, 8, 3)
+    assert _pace(p, 5, 8, 3) == (truth["allowed"], truth["low"])
+
+
+def test_without_a_band_the_two_lines_coincide():
+    allowed, low = _pace(sample(WEEK // 2, 20.0), 5, 8, 0)
+    assert low == allowed
+
+
+def test_the_throttle_line_sits_the_band_below_the_brake_line():
+    allowed, low = _pace(sample(WEEK // 2, 20.0), 5, 8, 4)
+    assert low == pytest.approx(allowed - 4)
+
+
+def test_the_band_is_floored_at_the_grubstake():
+    """m0 is what makes a fresh window startable at all, so the band opens as
+    the window advances rather than throttling its first step."""
+    allowed, low = _pace(sample(60, 0.0), 5, 8, 4)
+    assert low == 5
+    assert allowed < 5 + 4
+
+
+def test_a_sample_with_no_reset_clause_still_has_no_line():
+    """bucket_pace collapses both lines onto m0 there; the panel shades the
+    span instead, and a flat line at the grubstake would claim a pace line
+    that was never in force."""
+    assert _pace(sample(1, 40.0, resets=None, window=None), 5, 8, 3) is None
+
+
+@pytest.mark.parametrize("band", [0, None])
+def test_band_zero_draws_exactly_what_it_drew_before(band):
+    """The opt-out has to be invisible: one dashed line and the over-the-line
+    shading, which is the whole of what a panel held before the band existed.
+    None is the other way a policy can say no."""
+    ax = FakeAx()
+    _draw_window(ax, RUN, band)
+    assert len(ax.plots) == 1
+    assert ax.plots[0][1] == [12.0, 20.0]        # the brake line, nothing else
+    assert len(ax.fills) == 1                    # only the over-the-line region
+
+
+def test_a_band_adds_a_second_line_and_the_area_between_them():
+    """Shaded, not merely stroked: the question a band raises is how much of
+    the run was spent between the lines, which two strokes do not answer."""
+    ax = FakeAx()
+    _draw_window(ax, RUN, 4)
+    assert [p[1] for p in ax.plots] == [[8.0, 16.0], [12.0, 20.0]]
+    _xs, lows, highs, _kw = ax.fills[0]
+    assert (lows, highs) == ([8.0, 16.0], [12.0, 20.0])
+
+
+def test_the_overlay_says_nothing_about_a_band_that_is_off():
+    """Including in the legend -- a user who has not opted in must not be told
+    about a feature that is doing nothing."""
+    ax = FakeAx()
+    _draw_overlay_band(ax, 5, 8, 0)
+    assert not ax.plots and not ax.fills
+
+
+def test_the_overlay_band_spans_the_same_two_lines():
+    ax = FakeAx()
+    _draw_overlay_band(ax, 5, 8, 4)
+    _xs, lows, highs, kw = ax.fills[0]
+    assert "band" in kw["label"]
+    assert (lows[0], highs[0]) == (5, 5)         # both start on the grubstake
+    assert highs[-1] == pytest.approx(92)        # 100 - m1, the line's end
+    assert lows[-1] == pytest.approx(88)
+    assert min(lows) == 5                        # never under the grubstake
+
+
+def test_a_figure_with_a_band_renders(tmp_path):
+    """The one test that needs the optional extra. FakeAx cannot catch a
+    keyword matplotlib would reject, and `plot` failing at the last call in
+    the run is how that would otherwise be found."""
+    pytest.importorskip("matplotlib")
+    records = [record(RAW, ts_epoch=1789000000 + i * 3600) for i in range(6)]
+    series = collect(records, cli.parse_usage)
+    out = tmp_path / "band.png"
+    assert render(series, str(out), 5, 8, 3) == 0
+    assert out.stat().st_size > 0

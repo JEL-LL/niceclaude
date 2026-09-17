@@ -22,6 +22,7 @@ import os
 import pytest
 
 from niceclaude import cli
+from niceclaude._shared import HOOK_TIMEOUT
 
 HOOK = "/home/me/.local/bin/niceclaude-hook"
 
@@ -265,3 +266,87 @@ def test_default_location_is_dot_claude_under_home(monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     assert cli.claude_settings_path() == os.path.join(cli.HOME, ".claude",
                                                      "settings.json")
+
+
+# --- the registered timeout is the real ceiling -----------------------------
+#
+# It is worth knowing why these exist. The hook BLOCKS to pace an agent, so the
+# `timeout` we register is the longest it can ever pace for: when it expires the
+# harness kills the hook, the agent takes its tool call unpaced, and the killed
+# process never reaches the release line in main(), so nothing is logged. The
+# only trace is an unmatched `brake` in hook.log.
+#
+# That leaked for real, and for a long time, because two things were untested:
+# the value itself was a literal repeated at three call sites, and the branch
+# that refreshes it on an existing install was unreachable. A 822-line hook.log
+# showed 198 unmatched brakes, the recent ones spaced 6.00-6.01h apart to the
+# second -- the registered 21600 -- in a folder whose policy said
+# `max_delay: null`, meaning "never proceed while over the line".
+
+def timeouts(cfg):
+    return [e["timeout"]
+            for groups in cfg["hooks"].values()
+            for g in groups
+            for e in g["hooks"]]
+
+
+def test_every_registration_carries_the_declared_timeout(settings):
+    """Pinned against the constant rather than a literal, so the two cannot
+    drift -- but pinned, because an unpinned ceiling is one nobody notices."""
+    assert cli.cmd_install(force=False) == 0
+    got = timeouts(read(settings))
+    assert got, "nothing was registered at all"
+    assert set(got) == {HOOK_TIMEOUT}
+
+
+def test_the_timeout_is_long_enough_to_outlast_a_real_hold(settings):
+    """A sanity floor with a reason behind it, not a magic number.
+
+    A hold is bounded by its window's own reset, and the binding window here is
+    the seven-day weekly one. Six hours -- the value this shipped with -- is far
+    short of a hold that window can legitimately demand, which is exactly how
+    the leak arose. Anything at least a day clears every hold observed in
+    practice; the deepest overage in the log that exposed this solved to ~15h.
+    """
+    assert HOOK_TIMEOUT >= 86400
+
+
+def test_raising_the_timeout_reaches_an_existing_registration(settings,
+                                                              monkeypatch):
+    """The bug that would have made the fix land nowhere.
+
+    While the timeout was refreshed only in the `elif` for a CHANGED command
+    path, raising the ceiling could never reach anyone already installed: the
+    command still matched, so `install` reported "(already registered)" and left
+    the old value in force. The one change you most need to deploy would have
+    silently not deployed.
+    """
+    assert cli.cmd_install(force=False) == 0
+    cfg = read(settings)
+    for groups in cfg["hooks"].values():
+        for g in groups:
+            for e in g["hooks"]:
+                e["timeout"] = 21600          # what a pre-fix install left
+    with open(settings, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh)
+
+    assert cli.cmd_install(force=False) == 0
+    assert set(timeouts(read(settings))) == {HOOK_TIMEOUT}
+    # ...and without duplicating the registration on the way past: one entry
+    # per event, not a second one appended beside the one it just corrected.
+    for event in cli.HOOK_EVENTS:
+        assert commands(read(settings), event) == [HOOK]
+
+
+def test_a_timeout_only_change_still_round_trips_through_uninstall(settings):
+    """Whatever the merge rewrites, `uninstall` must still restore exactly what
+    was there -- the standing contract for a file we do not own."""
+    original = {"model": "opus", "hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "/usr/bin/theirs", "timeout": 5}]}]}}
+    with open(settings, "w", encoding="utf-8") as fh:
+        json.dump(original, fh)
+
+    assert cli.cmd_install(force=False) == 0
+    assert cli.cmd_uninstall() == 0
+    assert read(settings) == original

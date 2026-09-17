@@ -102,6 +102,89 @@ hours and each control action lasts ~1.68 hours. It is "decide whether to run,
 every couple of hours", not a fine-grained throttle. Expect that rather than be
 surprised by it.
 
+### 4a. …but the deadband is on the wrong side (amended)
+
+The section above is still right about what it actually argues: **no deadband
+above the line.** Letting usage run some margin `B` over the brake line before
+braking would spend the ceiling to buy smoothness, and the 1% quantum already
+supplies more hysteresis than an explicit `B` would.
+
+What it got wrong is treating that quantum as symmetric. The quantum bounds
+the *entry* to a brake. It says nothing about the *exit*, and the exit is where
+the cost was hiding:
+
+> a hold ends when `allowed(t) ≥ pess`, and `pess = pct + 1`
+
+So a brake releases at the moment the line reaches one quantum above the
+reported number — which means you resume with **under one quantum of real
+headroom**, and the very next 1% tick puts you over again. The claimed deadband
+is consumed entirely by the release, leaving none for the run that follows.
+
+That turns the weekly line into the worst possible duty cycle: a 1.68-hour hold,
+then roughly 1% of budget spent, then another 1.68-hour hold. Every hold is far
+longer than the prompt-cache TTL, so **every 1% of weekly budget costs one full
+cold context re-read**. §4's closing claim — "1.68-hour weekly brakes follow work
+bursts measured in hours, so one re-payment amortises over a long run" — assumed
+the burst between brakes was long. It is one quantum wide, which is exactly as
+long as the quantum is, and that is not long at all.
+
+**The fix is hysteresis, and it lives entirely below the brake line.** A second
+line sits `band` percent lower, and a hold aims at *that* one. The brake line
+keeps its meaning untouched — never above it — so §4's argument survives intact:
+we still do not let usage run over the line before braking. We let it come
+further *down* before releasing, which is a different knob on a different side
+and costs nothing from the ceiling.
+
+One hold then buys a whole band of running instead of one quantum, and the cold
+re-read amortises over the band rather than over the tick. Setting `band_delay`
+additionally turns that band into a lower gear rather than a free sprint, so the
+brake line is approached slowly and often not at all.
+
+The relationship to `max_delay` is the part worth keeping straight. `max_delay`
+also bought cache-warmth, but it paid for it out of the ceiling — it is the one
+knob that proceeds while over the line, which is why it is opt-in and why it is
+how you end up hitting your head. The band buys the same warmth out of headroom
+you had not yet spent. They compose, and they no longer compete.
+
+**Hysteresis needs memory, and `decide` has none.** This is the part that is
+easy to get wrong, and it was wrong in the first draft — where the band tested
+green, read correctly in every docstring, and did nothing at all.
+
+`decide` is stateless by design: it reclassifies from scratch on every pass, so
+one snapshot can serve many folders and a policy edit reaches a frozen agent
+within one chunk. But that means a bucket held above the brake line *stops being
+`over`* the instant the line rises past `pess` — which is precisely the old,
+zero-headroom release point. Recomputed honestly, the hold then ends there:
+`region` becomes `band`, nothing brakes, and the log says `line-caught-up`,
+which is also what a correct release says. The feature evaporates and leaves no
+trace that it did.
+
+`bucket_pace` returning the right wake time is not enough, because nothing ever
+gets to use it. The memory has to live in `run`, which latches "this hold began
+above the brake line" and passes it back into `decide`. A hold that began above
+the line runs all the way down; a hold that wandered into the band from below is
+a lower gear and costs one `band_delay`. Same region, opposite answers — and the
+only thing that can tell them apart is where the hold started.
+
+The testing lesson generalises: every test of a controller that samples a single
+instant, or starts the loop already in its steady state, is blind to this entire
+class of bug. The crossing is the behaviour.
+
+**Ceiling worth knowing:** `install` registers the hook at `timeout`, and that
+is the real limit on any hold — past it the harness kills the hook and the agent
+proceeds *unpaced*, silently, since a killed process never logs its release.
+
+It was 21600 (6h), and that leaked measurably: see `platform-findings.md` §8 for
+the 198 unmatched brakes, spaced six hours apart to the second, in a folder that
+had explicitly asked for no cap at all. Now 172800 (48h), which clears every
+hold observed in practice. A hold is bounded by its window's own reset, so the
+true worst case is a single window — seven days — and 604800 would put the
+ceiling out of reach entirely.
+
+This still interacts with band sizing, just no longer dangerously: a band costs
+its width in hold time, ~1.94h per point on the weekly line. Keep it small
+because a hold is time not working, not because the harness will cut it short.
+
 ---
 
 ## 5. Round pessimistically

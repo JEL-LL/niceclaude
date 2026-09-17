@@ -277,9 +277,10 @@ restraint is still applied — just as many short holds rather than one long one
 and the duty cycle it produces is roughly the same. What changes is that no
 single wait outlives the cache.
 
-Default is no limit, which holds until the line catches up. Pick a value under
-your cache TTL; note the TTL drops sharply once an account is on overage
-billing, so a cap chosen for the normal case may not help there.
+Default is no limit, which holds until the line catches up — or, where a band is
+configured, until the throttle line below it does. Pick a value under your cache
+TTL; note the TTL drops sharply once an account is on overage billing, so a cap
+chosen for the normal case may not help there.
 
 To remove a cap:
 
@@ -304,6 +305,167 @@ right now:      BRAKED -- session 90% over line 48.5%
 Releases from a cap are logged as `max_delay-release` — distinct from
 `line-caught-up`, so `hook.log` never conflates "we waited it out" with "we gave
 up waiting".
+
+It is no longer the only answer to the cache problem, though, and it is no
+longer the first one to reach for. A cap buys cache warmth out of the *ceiling*,
+because proceeding while over the line is exactly what it does. The next section
+buys the same warmth out of headroom you had not spent yet.
+
+## A second line below the first, so one hold buys more than one tick
+
+A hold used to end the moment the line reached `pess = pct + 1` — the
+pessimistic reading of a number quoted in whole percent. That releases the agent
+with under one quantum of real headroom, so the very next 1% tick puts it over
+again. On the weekly window that is a 1.68-hour hold for every 1% of budget
+spent, and every one of those holds is far longer than the prompt cache TTL. The
+quantum supplies a deadband on the way *in* to a brake and none at all on the
+way out, so the steady state was: hold, re-read the whole context from cold,
+spend 1%, hold again.
+
+`--band` puts a second line below the pace line and makes a hold run down to
+*that* one:
+
+```
+brake line      allowed = m0 + f_t * (100 - m0 - m1)      # unchanged
+throttle line   low     = max(m0, allowed - band)
+```
+
+The brake line keeps its exact old meaning — never above it — so nothing here is
+spent from the ceiling; the hysteresis lives entirely below the guarantee. The
+`max(m0, ...)` floor is what keeps a fresh window startable. `m0` is the
+grubstake that lets work begin at all, and without the floor a window that had
+just rolled would throttle its very first step, which is the one step the
+grubstake exists to permit. With it, the band opens as the window advances.
+
+Three regions, judged against `pess`:
+
+| region | when | what happens |
+|---|---|---|
+| free | `pess <= low` | full speed, no hold |
+| band | `low < pess <= allowed` | one `band_delay` per tool call |
+| over | `pess > allowed` | hold until the **throttle** line catches up |
+
+Both braking regions aim at the same target, the throttle line; the brake line
+only decides whether the hold is capped. That is where the money is. One hold
+now buys a whole band of running instead of one quantum, so the cold re-read
+amortises over the band rather than over the tick.
+
+### The two knobs are orthogonal
+
+`--band` is geometry and nothing else. It is a percentage, it defaults to 0, and
+0 is not a special case that switches a feature off: it puts the throttle line
+on top of the brake line, which is exactly the previous behaviour. There is no
+`--no-band` because `--band 0` already says it.
+
+`--band-delay` is what one hold costs *inside* the band. Left unset — the
+default — the band is pure release hysteresis: you run through it at full speed,
+and only the brake line ever stops you. Set it, and the band becomes a lower
+gear, one hold per tool call taken while still under the pace line, so the brake
+line is approached slowly and often not reached at all.
+
+`--max-delay` is unchanged and keeps its old meaning, which makes four corners
+worth knowing. Over the brake line with no cap, the hook holds until the
+throttle line catches up; with a cap it holds that long and then proceeds while
+still over the line, as before. Inside the band with no `--band-delay`, nothing
+holds at all; with one, a hold costs `band_delay`, or `min(band_delay,
+max_delay)` where the cap is the smaller. The two are not alternatives — the
+tighter one wins.
+
+Read against each other, they differ in what they spend. `--max-delay` buys
+cache warmth out of the ceiling: it is the one knob that deliberately proceeds
+while over the line, which is how you end up hitting your head. `--band` buys
+the same warmth out of headroom you had not yet spent. They compose, and they no
+longer compete — so if you set a cap to protect the cache, set a band first and
+see whether you still want the cap.
+
+One thing `--band-delay` will not do is release a *blind* agent. A snapshot too
+stale to trust is reported as over the brake line, because "I cannot see" must
+not resolve into "I am comfortably under the line". Only `--max-delay` proceeds
+on data we know we do not have.
+
+### Sizing a band, and the ceiling that limits it
+
+`install` registers the hook with `timeout: 172800` — 48 hours, and that is the
+real limit on any hold. Past it the harness kills the hook, and a killed hook
+does not brake: the agent proceeds *unpaced*, silently, because the killed
+process never gets to log its release. An unmatched `brake` in `hook.log` is the
+only trace.
+
+It was six hours, which leaked: a weekly bucket can easily solve to a hold
+longer than that, so a folder far over its line took one unpaced step every six
+hours, indefinitely. Note the shape of that bug — it is worst exactly where you
+asked for the most restraint, since `max_delay: null` means "hold however long
+it takes" and the timeout was silently rewriting it to "hold six hours, then go
+anyway".
+
+A hold is bounded by its window's own reset, so the longest one that can ever be
+demanded is a single window — seven days for the weekly buckets. 48h covers
+everything seen in practice with room to spare. If you want the ceiling provably
+unreachable rather than merely generous, 604800 is the number.
+
+Do not remove the field to lift the limit: omitted, it reverts to the hook
+default of ten minutes, which is far worse than the ceiling you were trying to
+escape.
+
+The weekly line rises about 0.52 %/h at the default margins, so sizing a band
+is no longer constrained by this — but a band still costs its width in hold
+time, so keep it small for the reasons in the section above.
+
+To size one against a run you already have rather than by arithmetic:
+
+```bash
+niceclaude plot --days 7 --band 2
+```
+
+`plot`'s `--band` — like its `--m0` and `--m1` — is drawing only. It shades the
+band onto the log you already recorded and changes no policy, so you can try a
+number against last week before pacing anything with it. Time in the shaded
+strip is time that would have been spent in the lower gear, cache-warm and still
+under the guarantee. Too thin and the trace keeps punching through to the brake
+line; too fat and it never leaves the band.
+
+### The two configurations, and what `status` shows
+
+Pure hysteresis — brake less often, and run at full speed once released:
+
+```bash
+niceclaude on ~/projects/nightly --model opus --band 2
+```
+
+The full lower gear — the same hysteresis, plus a deliberate crawl between the
+lines:
+
+```bash
+niceclaude on ~/projects/nightly --model opus --band 2 --band-delay 30
+```
+
+`--no-band-delay` goes back to full speed through the band. Like `--no-max-delay`
+it writes an explicit `null`, so it also overrides a `band_delay` set in
+`defaults`.
+
+`niceclaude status` reports the middle region as a state of its own, because
+calling it BRAKED would say work has stopped when it has not, and calling it
+running would hide a hold on every tool call:
+
+```
+  session                 20% used | lines  46.5/ 48.5% |  50.0% elapsed | ENFORCED | clear
+  week:all models         47% used | lines  46.5/ 48.5% |  50.0% elapsed | ENFORCED | THROTTLES 30s/call
+
+right now:      THROTTLED -- week:all models 47% in band (line 48.5%, throttle 46.5%)
+                holds 30s per tool call, then takes one step: a lower
+                gear, not a stop, and still under the brake line.
+                Full speed resumes in 2h54m (Wed 21:03 local), when the
+                throttle line catches up.
+```
+
+Both lines are printed once a band is configured, throttle first: one number
+cannot say which of three regions a bucket is in, and the throttle line is the
+one a hold actually runs down to, so quoting only the brake line would make
+every wait shown above look longer than the hook will take.
+
+Band holds are logged with the verb `throttle` rather than `brake`, so they
+neither swamp `hook.log` nor spoil the invariant that an unmatched `brake` means
+the harness killed the hook — `grep ' brake '` still counts real brakes.
 
 ## Why it is stopped, and for how long
 
@@ -392,7 +554,7 @@ regression, sparse real-world samples are as good as dense ones.
 uv run --with pytest pytest tests/ -q
 ```
 
-292 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
+388 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 
@@ -420,8 +582,9 @@ and that no line went unparsed.
 
 - `/usage` reports whole percentages. That 1% quantum is a floor on how finely
   the pacer can act: 1% of the 5h session window is 3 minutes, 1% of the weekly
-  window is 100 minutes. It supplies a deadband for free, which is why there is
-  no deadband setting.
+  window is 100 minutes. It supplies a deadband above the line for free, which
+  is why there is no setting for one — but it supplies none below the line,
+  where the release happens, which is what `--band` is for.
 - Braking is a sleep, not a denial. Returning non-zero would hand the model a
   refusal to reason about, costing tokens and derailing the task.
 - `PreToolUse` fires between API turns, so a freeze parks between connections

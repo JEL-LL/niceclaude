@@ -12,19 +12,32 @@ m0 is a starting grubstake, without which nothing could ever begin (the pure
 diagonal permits 0% at 0% elapsed). m1 is an end-of-window reserve, so we come
 in under the wire rather than exactly on it.
 
-Above the line means braking until the line rises to meet us. Usage never
-falls, so the wake time is solvable in closed form -- but it is not a
-commitment: the foreground session and sibling agents draw on the same
-account-global budget, so it is recomputed from fresh data on every poll and
-can move later while we wait.
+Above the line means braking. Usage never falls, so the wake time is solvable
+in closed form -- but it is not a commitment: the foreground session and
+sibling agents draw on the same account-global budget, so it is recomputed from
+fresh data on every poll and can move later while we wait.
+
+A second line, `band` points lower, is what the brake actually runs down to:
+
+    low(f_t) = max(m0, allowed(f_t) - band)
+
+Between the two is a lower gear rather than a stop -- held `band_delay` per
+tool call, or crossed at full speed when that is unset. The brake line keeps
+its meaning untouched, so everything the band does happens below the
+guarantee. `band` defaults to 0, which puts the two lines on top of each other.
 
 Quantization
 ------------
 `/usage` reports whole percentages. That 1% quantum floors how finely we can
 act: 1% of the 5h session window is 3 minutes, 1% of the weekly window is 100
-minutes. The quantum therefore supplies a deadband for free, which is why none
-is configured. It also means a reported P% could be anything up to (P+1)%, so
-the hook rounds against itself.
+minutes. It also means a reported P% could be anything up to (P+1)%, so the
+hook rounds against itself.
+
+The quantum supplies a deadband on the way *in* to a brake, which is why none
+is configured. It supplies none on the way out: releasing when the line reaches
+pct+1 leaves under one quantum of headroom, so the next tick crosses again.
+That asymmetry is what `band` exists to correct -- see harness/design-decisions
+section 4a.
 
 Architecture
 ------------
@@ -46,8 +59,9 @@ from datetime import datetime, timedelta, timezone
 
 from . import hook
 from ._shared import (  # noqa: E402
-    CONFIG_DIR, DATA_DIR, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE, DEFAULT_M0,
-    DEFAULT_M1, DEFAULT_MAX_DELAY, DEFAULT_POLICY, HOME,
+    CONFIG_DIR, DATA_DIR, DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
+    DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
+    DEFAULT_POLICY, HOME, HOOK_TIMEOUT,
     LOG_PATH, POLICY_PATH, SETTINGS_PATH,
     MAX_STALE, STATE_PATH, WINDOW_SECONDS, bucket_pace, model_matches,
     norm_path, normalize_enforce, path_within,
@@ -581,12 +595,22 @@ def splice_hook(cfg, command):
 
         if existing is None:
             groups.append({"matcher": "*", "hooks": [
-                {"type": "command", "command": command, "timeout": 21600}]})
+                {"type": "command", "command": command,
+                 "timeout": HOOK_TIMEOUT}]})
             changed = True
-        elif existing.get("command") != command:
-            existing["command"] = command
-            existing["timeout"] = 21600
-            changed = True
+        else:
+            if existing.get("command") != command:
+                existing["command"] = command
+                changed = True
+            # Checked independently of the command, and that matters: raising
+            # the ceiling is a timeout-only change, and while this was an
+            # `elif` on the command it could never reach an existing
+            # registration. `install` would find the command already correct,
+            # print "(already registered)", and leave the old ceiling in force
+            # -- so the one fix you most need to land would silently not land.
+            if existing.get("timeout") != HOOK_TIMEOUT:
+                existing["timeout"] = HOOK_TIMEOUT
+                changed = True
 
     return changed, None
 
@@ -679,7 +703,7 @@ def cmd_install(force):
 
     fragment = {"hooks": {
         ev: [{"matcher": "*", "hooks": [
-            {"type": "command", "command": command, "timeout": 21600}]}]
+            {"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]}]
         for ev in HOOK_EVENTS
     }}
     write_atomic(SETTINGS_PATH, json.dumps(fragment, indent=2))
@@ -848,7 +872,8 @@ def _watch_loop(interval):
 
 
 def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
-           no_max_delay=False):
+           no_max_delay=False, band=None, band_delay=None,
+           no_band_delay=False):
     pol = load_policy()
     key = norm_path(path)
     entry = pol["paths"].get(key, {})
@@ -863,6 +888,8 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
         entry["fanout_reserve"] = fanout_reserve
     if enforce is not None:
         entry["enforce"] = sorted(normalize_enforce(enforce))
+    if band is not None:
+        entry["band"] = band
     if no_max_delay:
         # An explicit null, not a pop. Popping would fall back to a
         # defaults-level cap, so "turn it off" would silently leave one on
@@ -872,6 +899,14 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
         entry["max_delay"] = None
     elif max_delay is not None:
         entry["max_delay"] = max_delay
+    if no_band_delay:
+        # An explicit null for the same reason as above, and it matters more
+        # here: a defaults-level band_delay is the setting most likely to be
+        # configured once and inherited everywhere, so a pop would leave this
+        # folder in the lower gear it was just told to leave.
+        entry["band_delay"] = None
+    elif band_delay is not None:
+        entry["band_delay"] = band_delay
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
@@ -941,13 +976,27 @@ def human_delta(seconds):
     return f"{s}s"
 
 
-def describe_hold(p, enforced, chunk):
+def describe_hold(p, enforced, chunk, band_hold=None):
     """How long this one line would hold work, in the row's last column.
 
     An ignored bucket still gets its wait computed, but phrased as the
     hypothetical it is: "would hold" is a line you could switch on with
     `--enforce`, "HOLDS" is one stopping you now.
+
+    Three regions, not two. Between the lines the wait in `p` is still the
+    solved release, but it is not what happens: the hook takes one band hold
+    and lets a step through, so printing the solve there would report hours
+    for something that costs seconds. `band_hold` is that cost after
+    max_delay has had its say, not the raw band_delay -- this column reports
+    what the hook does, and the tighter of the two caps is what it does.
+    None means no band hold is configured, and saying so is the only way a
+    reader can tell the knob is unset rather than the line uncrossed.
     """
+    if p["region"] == "band":
+        if band_hold is None:
+            return "clear -- in band, no band_delay"
+        return (f"{'THROTTLES' if enforced else 'would throttle'} "
+                f"{human_delta(band_hold)}/call")
     if not p["over"]:
         return "clear"
     if p["wait"] is None:
@@ -974,6 +1023,16 @@ def cmd_status(path):
     m1 = entry.get("m1", dflt.get('m1', DEFAULT_M1))
     chunk = entry.get("chunk", dflt.get("chunk", DEFAULT_CHUNK))
     max_delay = entry.get("max_delay", dflt.get("max_delay", DEFAULT_MAX_DELAY))
+    band = entry.get("band", dflt.get("band", DEFAULT_BAND))
+    band_delay = entry.get("band_delay",
+                           dflt.get("band_delay", DEFAULT_BAND_DELAY))
+    # One hold inside the band costs band_delay, except where max_delay is
+    # smaller: the two caps are not alternatives, the tighter one wins. Derived
+    # once, here, because both the table and the verdict below have to quote
+    # the hold the hook will actually take rather than the knob it came from.
+    band_hold = band_delay
+    if band_hold is not None and max_delay is not None:
+        band_hold = min(band_hold, max_delay)
     model = (entry.get("model") or "").lower()
     enforce = normalize_enforce(entry.get("enforce", dflt.get("enforce")))
     print(f"matched rule:   {matched}")
@@ -982,6 +1041,22 @@ def cmd_status(path):
     print(f"  m0 / m1       {m0} / {m1}")
     print(f"  max_delay     "
           f"{human_delta(max_delay) if max_delay is not None else 'no limit'}")
+    # Printed next to max_delay because that is the knob they are read
+    # against: max_delay buys cache warmth by spending the ceiling, the band
+    # buys it below the ceiling, and which one is set decides what a hold here
+    # actually costs.
+    if band:
+        geometry = f"{band:g}% under the brake line"
+    else:
+        geometry = "0 -- brake line only, the old behaviour"
+    print(f"  band          {geometry}")
+    if band_delay is not None:
+        gear = f"{human_delta(band_delay)} per tool call"
+    elif band:
+        gear = "none -- the band is release hysteresis only"
+    else:
+        gear = "none"
+    print(f"  band_delay    {gear}")
     print(f"  enforces      {', '.join(sorted(enforce))}")
 
     if not os.path.exists(STATE_PATH):
@@ -1025,7 +1100,7 @@ def cmd_status(path):
             or (k == "week:all models" and "week" in enforce)
             or ("model" in enforce and model_matches(k, model)))
         mark = "ENFORCED" if enforced else "ignored "
-        p = bucket_pace(b, now, m0, m1)
+        p = bucket_pace(b, now, m0, m1, band)
         if p is None:
             print(f"  {k:22} unusable (no percentage)")
             continue
@@ -1033,11 +1108,18 @@ def cmd_status(path):
             # No reset clause yet, so f_t is unknown and bucket_pace judged
             # against the m0 floor. The line cannot be solved for a wake time.
             where = f"line {m0:5.1f}% (floor) | window start unknown"
+        elif band:
+            # Both lines, throttle first. One number cannot say which of three
+            # regions a bucket is in, and the throttle line is the one a hold
+            # actually runs down to -- printing only the brake line would make
+            # every wait below look longer than the hook will take.
+            where = (f"lines {p['low']:5.1f}/{p['allowed']:5.1f}% "
+                     f"| {p['elapsed'] * 100:5.1f}% elapsed")
         else:
             where = (f"line {p['allowed']:5.1f}% "
                      f"| {p['elapsed'] * 100:5.1f}% elapsed")
         print(f"  {k:22} {p['pct']:>3.0f}% used | {where} | {mark} "
-              f"| {describe_hold(p, enforced, chunk)}")
+              f"| {describe_hold(p, enforced, chunk, band_hold)}")
 
     # What the hook itself would decide, from this same snapshot -- asked of
     # the hook rather than recomputed, so `status` cannot claim a folder is
@@ -1048,18 +1130,35 @@ def cmd_status(path):
         print("right now:      not paced -- the hook returns immediately here")
         return 0
     if not d.get("braked"):
-        print("right now:      running -- no enforced line is over")
+        if d.get("region") == "band":
+            # Running while between the lines is only reachable with no
+            # band_delay, and it is worth naming: the reader is above the
+            # throttle line and nothing is holding them, which looks like the
+            # band failing to work rather than the band working as configured.
+            print("right now:      running -- between the lines, and with no "
+                  "band_delay the")
+            print("                band is pure release hysteresis: it costs "
+                  "nothing to")
+            print("                cross, and only deepens the hold the brake "
+                  "line triggers.")
+        else:
+            print("right now:      running -- no enforced line is over")
         return 0
 
     reason = d.get("reason", "")
     wake_at = d.get("wake_at", now)
     chunk = d.get("chunk", chunk)
+    region = d.get("region")
+    # Which cap applies is the whole point of the second line: over the brake
+    # line only max_delay can cut a hold short, while inside the band the hold
+    # is the band's own, taken below the line and giving up no ceiling.
+    cap = band_hold if region == "band" else max_delay
     # The sleep is chunked, so a frozen agent re-reads policy -- and re-derives
     # this wait -- far more often than the wait itself is long. That is what
     # lets `global off` free an already-frozen agent within one chunk.
     nap = min(chunk, max(1.0, wake_at - now))
-    if max_delay is not None:
-        nap = max(1.0, min(nap, max_delay))
+    if cap is not None:
+        nap = max(1.0, min(nap, cap))
     if d.get("blind"):
         why = reason[len("BLIND: "):] if reason.startswith("BLIND: ") else reason
         print(f"right now:      BRAKED, blind -- {why}")
@@ -1073,17 +1172,53 @@ def cmd_status(path):
         if max_delay is not None:
             print(f"                max_delay caps the hold at "
                   f"{human_delta(max_delay)}, then it proceeds anyway.")
+        elif band_delay is not None:
+            # The one place a reader will expect band_delay to apply and find
+            # that it does not. Blind is reported as `over` on purpose: "I
+            # cannot see" must not resolve to "I am under the brake line",
+            # which is what letting band_delay release this would assert.
+            print("                band_delay does not apply while blind, and "
+                  "deliberately:")
+            print("                only max_delay proceeds on data we know we "
+                  "do not have.")
+    elif region == "band":
+        when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
+        print(f"right now:      THROTTLED -- {reason}")
+        # Not a stop, and the difference is the whole point of the second
+        # line: the agent keeps working, one step per hold, while still under
+        # the brake line. Nothing is being spent from the ceiling here.
+        print(f"                holds {human_delta(cap)} per tool call, then "
+              f"takes one step: a lower")
+        print("                gear, not a stop, and still under the brake "
+              "line.")
+        if cap != band_delay:
+            print(f"                (band_delay is "
+                  f"{human_delta(band_delay)}; max_delay caps it here.)")
+        print(f"                Full speed resumes in "
+              f"{human_delta(wake_at - now)} ({when} local), when the")
+        print("                throttle line catches up.")
     else:
         when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
         print(f"right now:      BRAKED -- {reason}")
+        # The hold runs down to the THROTTLE line, not back to the brake line.
+        # Releasing at the brake line is what made every 1% tick cost another
+        # hold, so naming the wrong line here would misreport the wait by a
+        # whole band -- which is exactly the quantity the band was added to
+        # buy.
+        clears = f"{human_delta(wake_at - now)} ({when} local)"
         # With max_delay set the hook stops holding long before the line
         # catches up, so reporting the solved release as the wait would
         # overstate it by hours. Report what it will actually do.
         if max_delay is not None and wake_at - now > max_delay:
             print(f"                holds {human_delta(max_delay)} (max_delay), then "
                   f"proceeds while still over")
-            print(f"                the line; the line itself clears in "
-                  f"{human_delta(wake_at - now)} ({when} local).")
+            if band:
+                print(f"                the line; the throttle line {band:g}% "
+                      f"under it clears in")
+                print(f"                {clears}.")
+            else:
+                print(f"                the line; the line itself clears in "
+                      f"{clears}.")
             print(f"                Each later tool call brakes again for up to "
                   f"{human_delta(max_delay)}.")
             print("                That clearing time is not a promise: every session")
@@ -1093,6 +1228,11 @@ def cmd_status(path):
         else:
             print(f"                releases in {human_delta(wake_at - now)} ({when} "
                   f"local); next check in {human_delta(nap)}")
+            if band:
+                print(f"                It runs down to the throttle line, "
+                      f"{band:g}% below the brake")
+                print("                line, so the step it takes is not "
+                      "straight back into a hold.")
             print("                That release is not a promise: every session draws on")
             print("                the same account-wide budget, so it can move out.")
 
@@ -1443,12 +1583,17 @@ checkpoint.
 
 Running `on` again for a path that already has a rule changes only the
 settings you name and keeps the rest. Settings a rule does not carry fall back
-to the `defaults` block of policy.json (initially m0 5, m1 8, no cap), which
-`niceclaude list` prints.
+to the `defaults` block of policy.json (initially m0 5, m1 8, no cap, no
+band), which `niceclaude list` prints.
 
 Each window's pace line is  allowed = m0 + f_t * (100 - m0 - m1),  where f_t
 is the fraction of the window's time elapsed. Usage over the line brakes the
 folder until the line catches up.
+
+--band puts a second line below that one and makes a hold run down to it, so
+work resumes with a band of headroom instead of a fraction of a percent. With
+--band-delay the space between the lines becomes a lower gear -- one hold per
+tool call, taken while still under the pace line -- rather than a free run.
 
 The hook cannot discover the running model, so the per-model weekly bucket is
 enforced only when --model is declared.
@@ -1458,6 +1603,7 @@ examples:
   niceclaude on ~/projects/nightly --model opus
   niceclaude on ~/projects/alpha --model opus --enforce session
   niceclaude on ~/projects/nightly --max-delay 240
+  niceclaude on ~/projects/nightly --band 2 --band-delay 30
   niceclaude on / --model opus              # pace everything, then carve
   niceclaude off ~/projects/urgent          #   out what should run free
 """),
@@ -1515,17 +1661,18 @@ Explain the policy for a folder, and what the hook would do there right now.
 
 For PATH (default: the current directory) this reports whether the hook is
 registered at all, the global switch, which rule matched and its effective
-settings (model, m0/m1, max_delay, enforced windows), and then every usage
-bucket in the current snapshot: percent used, where the pace line is, and the
-hold each one would impose, whether or not this folder enforces it. Seeing the
-ignored buckets priced is how an --enforce choice is checked rather than
-guessed at.
+settings (model, m0/m1, max_delay, band, band_delay, enforced windows), and
+then every usage bucket in the current snapshot: percent used, where the pace
+line is, and the hold each one would impose, whether or not this folder
+enforces it. Seeing the ignored buckets priced is how an --enforce choice is
+checked rather than guessed at.
 
 The final "right now" verdict comes from the hook's own decision function on
 the same snapshot, so status cannot say running about a folder the hook is
-holding. When braked it gives the reason, the release time, and how often the
-hold is re-evaluated; with a max_delay set it says what the cap will actually
-do.
+holding. It reads THROTTLED between the lines, where work continues a step at
+a time, and BRAKED above the pace line, where it stops. Either way it gives
+the reason, the release time, and how often the hold is re-evaluated; with a
+max_delay set it says what the cap will actually do.
 
 Warns when the snapshot is older than 180s, which usually means `watch` is not
 running. If NICECLAUDE_OFF is set in this shell it says so, instead of
@@ -1596,6 +1743,19 @@ stopped a month ago draws that log's last week rather than an empty figure.
 Either way the x-axis is dated and the title carries the span, so you can see
 which one you are looking at.
 
+`--band N` draws the throttle line N points under the brake line and shades
+between them, so the band reads as territory the trace travelled through
+rather than a second stroke. Time spent in the band is time spent in the lower
+gear -- cache-warm and still under the guarantee -- so seeing how much of a run
+sat there is the quickest read on whether a band is sized right. Too thin and
+the trace keeps punching through to the brake line; too fat and it never leaves
+the band at all.
+
+All of `--m0`, `--m1` and `--band` are drawing only: they redraw the log
+against a line you are CONSIDERING, and change no policy. That is the point of
+them -- size a band against the run you already have, before you pace anything
+with it.
+
 Requires matplotlib, which is an optional extra:
 
     uv tool install "niceclaude[plot]"
@@ -1608,6 +1768,8 @@ The daemon and the hook never import it, so nothing else pays for it.
   niceclaude plot --days 30 -o month.png
   niceclaude plot --days 1 --m0 10      # redraw a day against a line
                                         # you are considering
+  niceclaude plot --days 7 --band 2     # how much of last week would have
+                                        # been spent in a 2-point band
 """),
 
     "help": dict(
@@ -1726,6 +1888,30 @@ def build_parser():
                      help="remove the cap: hold until the line catches up. "
                           "Writes an explicit null, so it also overrides a "
                           "cap set in the policy's defaults")
+    o.add_argument("--band", type=float, metavar="PCT",
+                   help="put a second line this many percent below the pace "
+                        "line, and end a hold there rather than at the line "
+                        "itself (default: the policy's, initially 0, which "
+                        "is one line and the old behaviour). Without it a "
+                        "hold ends with under one quantum of headroom and "
+                        "the next 1%% tick brakes again; a band means one "
+                        "hold buys a band's worth of running. Keep it small: "
+                        "the weekly line rises ~0.52%%/h, so much over 3 "
+                        "implies a hold past the hook's registered timeout")
+    thr = o.add_mutually_exclusive_group()
+    thr.add_argument("--band-delay", type=float, dest="band_delay",
+                     metavar="SECONDS",
+                     help="hold this long per tool call while inside the "
+                          "band, making it a lower gear instead of a free "
+                          "run. Taken while still under the pace line, so it "
+                          "gives up no ceiling. Default: unset, meaning the "
+                          "band is release hysteresis only and is crossed at "
+                          "full speed")
+    thr.add_argument("--no-band-delay", action="store_true",
+                     dest="no_band_delay",
+                     help="run the band at full speed again. Writes an "
+                          "explicit null, so it also overrides a band_delay "
+                          "set in the policy's defaults")
     o.add_argument("--enforce", metavar="WINDOWS",
                    help="comma-separated windows to pace against: session "
                         "(the 5h window), week (the shared weekly window), "
@@ -1761,6 +1947,11 @@ def build_parser():
                          "Drawing only; the policy is unchanged")
     pl.add_argument("--m1", type=float, default=DEFAULT_M1, metavar="PCT",
                     help="m1 of the line to draw (default: %(default)s). "
+                         "Drawing only; the policy is unchanged")
+    pl.add_argument("--band", type=float, default=DEFAULT_BAND, metavar="PCT",
+                    help="draw the throttle line this far under the brake "
+                         "line, and shade between them (default: "
+                         "%(default)s, which draws the brake line alone). "
                          "Drawing only; the policy is unchanged")
     h = _command(sub, "help")
     which = h.add_argument("command", nargs="?", metavar="command",
@@ -1813,7 +2004,8 @@ def main(argv=None):
         return cmd_stop()
     if a.cmd == "on":
         return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce,
-                      a.max_delay, a.no_max_delay)
+                      a.max_delay, a.no_max_delay, a.band, a.band_delay,
+                      a.no_band_delay)
     if a.cmd == "off":
         return cmd_off(a.path)
     if a.cmd == "global":
@@ -1833,7 +2025,7 @@ def main(argv=None):
             print(f"  plotting {len(kept)} of {len(records)} samples "
                   f"-- the last {a.days:g} {unit} of the log")
         series = plotmod.collect(kept, parse_usage)
-        return plotmod.render(series, a.out, a.m0, a.m1)
+        return plotmod.render(series, a.out, a.m0, a.m1, a.band)
     return 1
 
 

@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from ._shared import DEFAULT_M0, DEFAULT_M1
+from ._shared import DEFAULT_BAND, DEFAULT_M0, DEFAULT_M1, bucket_pace
 
 # From the validated reference palette: the first three categorical slots, a
 # recessive neutral for the threshold, and a status colour for the over-line
@@ -63,23 +63,71 @@ def _segments(points):
     return out
 
 
-def _draw_window(ax, run):
-    """One live window: the pace line, plus shading only where usage exceeds it."""
+def _draw_window(ax, run, band):
+    """One live window: the pace lines, plus shading where usage exceeds them."""
     xs = [r[0] for r in run]
     ys = [r[1] for r in run]
     allowed = [r[2] for r in run]
+    # The band is shaded as territory rather than left as a second stroke. The
+    # question it raises is how much of the run was spent between the lines,
+    # and two dashed lines a couple of points apart do not answer that at this
+    # figure's scale -- at 150dpi a 2-point band is about four pixels.
+    if band:
+        low = [r[3] for r in run]
+        ax.fill_between(xs, low, allowed, color=MUTED, alpha=0.14, lw=0, zorder=1)
+        ax.plot(xs, low, color=MUTED, lw=1.0, ls=(0, (2, 3)), zorder=2)
     ax.plot(xs, allowed, color=MUTED, lw=1.4, ls=(0, (5, 3)), zorder=2)
     ax.fill_between(xs, allowed, ys, where=[y > a for y, a in zip(ys, allowed)],
                     color=CRITICAL, alpha=0.18, lw=0, zorder=1, interpolate=True)
 
 
-def _allowed(p, m0, m1):
-    """The pace line at this sample's instant, or None when unknowable."""
-    if p["resets_epoch"] is None or p["window_seconds"] is None:
+def _pace(p, m0, m1, band):
+    """Both line heights at this sample's instant, or None when unknowable.
+
+    Routed through bucket_pace rather than worked out here. This module used to
+    keep its own copy of the brake line, which is exactly how a plot comes to
+    draw a line the hook does not brake on -- and a budget chart that disagrees
+    with the controller is worse than no chart.
+
+    elapsed is None exactly when the sample carried no reset clause. bucket_pace
+    collapses both lines onto m0 there, but the panel shades those spans as
+    "nothing to adhere to"; drawing a flat line at the grubstake instead would
+    claim a pace line that was never in force.
+    """
+    pace = bucket_pace(p, p["ts_epoch"], m0, m1, band)
+    if pace is None or pace["elapsed"] is None:
         return None
-    start = p["resets_epoch"] - p["window_seconds"]
-    ft = (p["ts_epoch"] - start) / p["window_seconds"]
-    return m0 + ft * (100 - m0 - m1)
+    return pace["allowed"], pace["low"]
+
+
+def _unit_pace(ft, m0, m1, band):
+    """Both line heights at window progress `ft`, on a one-second window.
+
+    The overlay panel plots against progress instead of time, which is these
+    same two lines with the clock divided out. Putting a synthetic window
+    through the same solver stops that panel from parting company with the
+    per-bucket ones over an algebraic shortcut.
+    """
+    pace = bucket_pace({"pct": 0, "resets_epoch": 1.0, "window_seconds": 1.0},
+                       ft, m0, m1, band)
+    return pace["allowed"], pace["low"]
+
+
+def _draw_overlay_band(ax, m0, m1, band):
+    """The band on the window-progress panel, if there is one to draw.
+
+    Sampled rather than solved for the corner where the m0 floor gives way to
+    the diagonal: that corner is geometry, and bucket_pace owns it. 0.1% steps
+    put it inside a pixel at the size this figure is written at.
+    """
+    if not band:
+        return
+    xs = [i * 0.1 for i in range(1001)]
+    pairs = [_unit_pace(x / 100.0, m0, m1, band) for x in xs]
+    lows = [lo for _a, lo in pairs]
+    ax.fill_between(xs, lows, [a for a, _lo in pairs], color=MUTED, alpha=0.14,
+                    lw=0, zorder=1, label=f"throttle band ({band:g} pts)")
+    ax.plot(xs, lows, color=MUTED, lw=1.2, ls=(0, (2, 3)), zorder=3)
 
 
 def per_model_keys(series):
@@ -173,7 +221,11 @@ def collect(records, parse_usage):
     return series
 
 
-def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
+def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1, band=DEFAULT_BAND):
+    # Clamped exactly as bucket_pace clamps it, so the drawing and the
+    # arithmetic cannot disagree about whether there is a band at all: a
+    # negative one would otherwise shade a sliver of nothing above the line.
+    band = max(0, band or 0)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -216,7 +268,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
     for idx, (ax, key) in enumerate(zip(axes, panels)):
         colour = _slot(idx)
         pts = series[key]
-        over_count = total = idle = 0
+        over_count = band_count = total = idle = 0
         worst = 0.0
         wins = []
 
@@ -231,34 +283,44 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
             # rather than leaving a gap that reads as missing data.
             run, prev_active = [], None
             for p, x, y in zip(seg, xs, ys):
-                a = _allowed(p, m0, m1)
-                active = a is not None
+                pace = _pace(p, m0, m1, band)
+                active = pace is not None
                 if active:
-                    run.append((x, y, a))
+                    a, lo = pace
+                    run.append((x, y, a, lo))
                     total += 1
                     if y > a:
                         over_count += 1
                         worst = max(worst, y - a)
+                    elif y > lo:
+                        band_count += 1
                 else:
                     idle += 1
                 if prev_active is True and not active and run:
-                    _draw_window(ax, run); wins.append(run); run = []
+                    _draw_window(ax, run, band); wins.append(run); run = []
                 if prev_active is False and active:
                     ax.axvspan(xs[0] if not run else x, x, color=MUTED,
                                alpha=0.055, lw=0, zorder=0)
                 prev_active = active
             if run:
-                _draw_window(ax, run)
+                _draw_window(ax, run, band)
                 wins.append(run)
 
         windows[key] = wins
-        stats[key] = (over_count, total, idle, worst)
+        stats[key] = (over_count, band_count, total, idle, worst)
         ax.set_ylim(0, 100)
         ax.set_ylabel("% of budget", color=INK_2, fontsize=10)
         pct_over = 100.0 * over_count / total if total else 0.0
         share_idle = 100.0 * idle / (idle + total) if (idle + total) else 0.0
+        pct_band = 100.0 * band_count / total if total else 0.0
+        # Terse, and only when a band was asked for. The two clauses above
+        # already reach the right edge for a key as long as "week:all models",
+        # and a third written out in their style ran off the canvas -- measured,
+        # not guessed.
+        band_note = f"    \u00b7    {pct_band:.1f}% in the band" if band else ""
         chrome(ax, f"{key}    —    {pct_over:.1f}% of live samples above the line"
-                   f"    \u00b7    {share_idle:.0f}% of the log had no window running")
+                   f"    \u00b7    {share_idle:.0f}% of the log had no window "
+                   f"running" + band_note)
 
     for a in axes[:-1]:          # shared x: only the bottom time panel is labelled
         a.tick_params(labelbottom=False)
@@ -277,6 +339,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
     norm_ax.plot(diag_x, diag_y, color=MUTED, lw=1.6, ls=(0, (5, 3)), zorder=3)
     norm_ax.fill_between(diag_x, diag_y, [100, 100], color=CRITICAL, alpha=0.07,
                          lw=0, zorder=1)
+    _draw_overlay_band(norm_ax, m0, m1, band)
     norm_ax.annotate("over budget", xy=(3, 97), color=CRITICAL, fontsize=10,
                      va="top", ha="left", fontweight="bold")
     norm_ax.annotate("the pace line", xy=(72, (m0 + (100 - m1)) * 0.5 - 2),
@@ -294,7 +357,7 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
             if len(run) < 2:
                 continue
             fx, fy = [], []
-            for x, y, a in run:
+            for x, y, a, _low in run:
                 # invert allowed() back to window progress
                 fx.append(100.0 * (a - m0) / (100 - m0 - m1))
                 fy.append(y)
@@ -324,17 +387,23 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1):
             t.set_color(INK_2)
 
     span_h = (series[panels[0]][-1]["ts_epoch"] - series[panels[0]][0]["ts_epoch"]) / 3600
+    # The geometry the figure was drawn against: these are drawing-only
+    # overrides, so a saved png that does not name the line it shows cannot be
+    # compared with another one.
+    geometry = f"m0={m0:g}, m1={m1:g}" + (f", band={band:g}" if band else "")
     fig.suptitle(
         f"niceclaude — utilization vs pace line   "
-        f"(m0={m0:g}, m1={m1:g};  {span_h:.0f}h)",
+        f"({geometry};  {span_h:.0f}h)",
         color=INK, fontsize=14, fontweight="bold", x=0.012, ha="left", y=0.995)
     fig.subplots_adjust(left=0.075, right=0.985, top=0.935, bottom=0.075)
     fig.savefig(out_path, dpi=150, facecolor=SURFACE)
     print(f"wrote {out_path}")
-    for key, (over, total, idle, worst) in stats.items():
+    for key, (over, in_band, total, idle, worst) in stats.items():
         pc = 100.0 * over / total if total else 0.0
+        throttled = f"{in_band}/{total} in the band, " if band else ""
         print(f"  {key:22} {over}/{total} live samples over the line ({pc:.1f}%), "
-              f"worst overshoot {worst:.1f} pts; {idle} samples with no window running")
+              f"{throttled}worst overshoot {worst:.1f} pts; "
+              f"{idle} samples with no window running")
     if omitted:
         print(f"  note: {', '.join(omitted)} {'has' if len(omitted) == 1 else 'have'} "
               f"a panel but no trace on the overlay -- the fixed colour order "

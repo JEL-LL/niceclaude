@@ -209,7 +209,13 @@ question, gets the same answer, and they converge.
 
 ## 8. Hook timeouts are honoured well past the default
 
-The default is 60s; the `timeout` field is in seconds.
+The `timeout` field is in seconds, and is per-hook — not pooled across the
+hooks matching an event.
+
+**Correction (2026-09-17):** this section recorded the default as 60s. The
+documentation gives **600s** for `command` hooks. Whichever is right, the
+conclusion is unchanged and if anything stronger: omitting the field is not a
+way to remove the ceiling, it is a way to set it to ten minutes.
 
 | Test | Configured timeout | Slept | Elapsed | Result |
 |---|---|---|---|---|
@@ -217,7 +223,21 @@ The default is 60s; the `timeout` field is in seconds.
 | 2 | 21600 | 700s | 708s | tool call proceeded normally |
 
 No clamp at 60s, 300s, or 600s; no independent watchdog killing long hooks. A
-multi-hour freeze is not *proven*, but nothing suggests a ceiling.
+multi-hour freeze is not *proven*, but nothing suggests a ceiling, and no
+maximum is documented for `command` hooks.
+
+**What expiry does, and why it is silent.** Claude Code cancels the hook and
+discards its output; for `PreToolUse` the tool call then proceeds as though the
+hook had produced no decision. The killed process never reaches the release
+line in `main()`, so nothing is written. An unmatched `brake` in `hook.log` is
+the entire trace.
+
+That is not theoretical. At `timeout: 21600` one 822-line `hook.log` held 198
+unmatched brakes, the recent ones spaced 6.00–6.01h apart to the second, all
+`week:Fable`, with the percentage climbing 41 → 67 straight through them — in a
+folder configured `max_delay: null`, which is an explicit "never proceed while
+over the line". The registered timeout was quietly converting that into
+`max_delay: 21600`. Raised to 172800 (48h); see `_shared.HOOK_TIMEOUT`.
 
 Because `PreToolUse` fires between API turns, nothing is in flight during the
 sleep — the freeze parks between connections rather than stalling one
