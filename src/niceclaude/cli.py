@@ -24,7 +24,9 @@ A second line, `band` points lower, is what the brake actually runs down to:
 Between the two is a lower gear rather than a stop -- held `band_delay` per
 tool call, or crossed at full speed when that is unset. The brake line keeps
 its meaning untouched, so everything the band does happens below the
-guarantee. `band` defaults to 0, which puts the two lines on top of each other.
+guarantee. `band` defaults to 7 points and `band_delay` to 3 minutes, so the
+lower gear is the out-of-the-box behaviour; `band` 0 puts the two lines back
+on top of each other, which is the controller as it was before the band.
 
 Quantization
 ------------
@@ -1652,8 +1654,8 @@ checkpoint.
 
 Running `on` again for a path that already has a rule changes only the
 settings you name and keeps the rest. Settings a rule does not carry fall back
-to the `defaults` block of policy.json (initially m0 5, m1 8, no cap, no
-band), which `niceclaude list` prints.
+to the `defaults` block of policy.json (initially m0 5, m1 8, no cap, a 7%
+band held 3m per call), which `niceclaude list` prints.
 
 Each window's pace line is  allowed = m0 + f_t * (100 - m0 - m1),  where f_t
 is the fraction of the window's time elapsed. Usage over the line brakes the
@@ -1969,27 +1971,27 @@ def build_parser():
     o.add_argument("--band", type=float, metavar="PCT",
                    help="put a second line this many percent below the pace "
                         "line, and end a hold there rather than at the line "
-                        "itself (default: the policy's, initially 0, which "
-                        "is one line and the old behaviour). Without it a "
+                        "itself (default: the policy's, initially 7). At 0 a "
                         "hold ends with under one quantum of headroom and "
                         "the next 1%% tick brakes again; a band means one "
-                        "hold buys a band's worth of running. Keep it small: "
-                        "the weekly line rises ~0.52%%/h, so much over 3 "
-                        "implies a hold past the hook's registered timeout")
+                        "hold buys a band's worth of running. It costs its "
+                        "width in hold time -- the weekly line rises "
+                        "~0.52%%/h -- so a band much past 20 implies a hold "
+                        "past the hook's registered timeout")
     thr = o.add_mutually_exclusive_group()
     thr.add_argument("--band-delay", type=float, dest="band_delay",
                      metavar="SECONDS",
                      help="hold this long per tool call while inside the "
                           "band, making it a lower gear instead of a free "
                           "run. Taken while still under the pace line, so it "
-                          "gives up no ceiling. Default: unset, meaning the "
-                          "band is release hysteresis only and is crossed at "
-                          "full speed")
+                          "gives up no ceiling. Default: the policy's, "
+                          "initially 180 (3 minutes)")
     thr.add_argument("--no-band-delay", action="store_true",
                      dest="no_band_delay",
-                     help="run the band at full speed again. Writes an "
-                          "explicit null, so it also overrides a band_delay "
-                          "set in the policy's defaults")
+                     help="run the band at full speed: release hysteresis "
+                          "only, no lower gear. Writes an explicit null, so "
+                          "it also overrides a band_delay set in the "
+                          "policy's defaults")
     o.add_argument("--enforce", metavar="WINDOWS",
                    help="comma-separated windows to pace against: session "
                         "(the 5h window), week (the shared weekly window), "

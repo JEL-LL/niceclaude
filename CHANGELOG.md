@@ -45,14 +45,25 @@ refactors and internal cleanups do not need a line at all.
   whole band of running instead of one tick.
 
   `--band-delay SECONDS` is the second, independent knob: what one hold costs
-  *inside* the band. Left unset the band is pure release hysteresis and is run
-  through at full speed. Set, it becomes a lower gear — each tool call holds
-  that long, so the brake line is approached slowly and often not reached.
-  `--no-band-delay` writes an explicit `null`, so it also overrides a value set
-  in `defaults`.
+  *inside* the band. It is a lower gear — each tool call holds that long, so
+  the brake line is approached slowly and often not reached. Set it to `null`
+  (`--no-band-delay`) and the band is pure release hysteresis instead, run
+  through at full speed; the explicit `null` also overrides a value set in
+  `defaults`.
 
-  `--band 0` is the default and is the previous behaviour exactly, so upgrading
-  changes nothing until you opt in.
+  **Both ship on: `band` 7 and `band_delay` 180 (3 minutes).** A band crossed
+  at full speed is spent almost immediately and the next hold is the
+  full-length one the band exists to avoid, so the lower gear is the useful
+  configuration and it is the one you get by default. Seven points is ~13h of
+  headroom on the weekly line, bought below the brake line and taking nothing
+  from the ceiling. `--band 0 --no-band-delay` is the pre-band controller
+  exactly, for a folder that wants it.
+
+  A rule's `null` means *off*, not *inherit*, for `band`, `band_delay` and
+  `max_delay` — the key's presence picks the source. That distinction was
+  invisible while these defaults were themselves off; with them set, falling
+  back on a written `null` would have made `--no-band-delay` turn the lower
+  gear on.
 
   This does **not** replace `--max-delay`, which keeps its exact old meaning.
   The two now divide the work honestly: `max_delay` buys cache warmth by
@@ -62,8 +73,9 @@ refactors and internal cleanups do not need a line at all.
   `min(band_delay, max_delay)`; above the brake line only `max_delay` applies.
 
   Sizing: a band costs its width in hold time, ~1.94h per point on the weekly
-  line. That is time not working, so keep it small — but it is no longer near
-  the hook's registered ceiling, which was raised in the same release (below).
+  line. That is time not working, but it is bought below the brake line rather
+  than out of the ceiling, and even at the default 7 it is nowhere near the
+  hook's registered timeout, which was raised in the same release (below).
   `niceclaude plot --days 7 --band 2` draws a band against a log you already
   have, without touching any policy, which is the cheap way to size one.
 

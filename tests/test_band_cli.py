@@ -182,10 +182,10 @@ def paced(tmp_path, monkeypatch):
 
     def setup(pct, band=BAND, band_delay=None, max_delay=None,
               ts_epoch=HALFWAY - 10):
+        # band_delay is always written, so band_delay=None is the explicit null
+        # that means "no lower gear" rather than "inherit the shipped 180".
         entry = {"paced": True, "model": "opus", "enforce": "session",
-                 "band": band}
-        if band_delay is not None:
-            entry["band_delay"] = band_delay
+                 "band": band, "band_delay": band_delay}
         if max_delay is not None:
             entry["max_delay"] = max_delay
         cli.save_policy({"global": {"enabled": True},

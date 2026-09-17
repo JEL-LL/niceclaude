@@ -352,23 +352,29 @@ amortises over the band rather than over the tick.
 
 ### The two knobs are orthogonal
 
-`--band` is geometry and nothing else. It is a percentage, it defaults to 0, and
+`--band` is geometry and nothing else. It is a percentage and it defaults to 7.
 0 is not a special case that switches a feature off: it puts the throttle line
-on top of the brake line, which is exactly the previous behaviour. There is no
+on top of the brake line, which is exactly the pre-band behaviour. There is no
 `--no-band` because `--band 0` already says it.
 
-`--band-delay` is what one hold costs *inside* the band. Left unset — the
-default — the band is pure release hysteresis: you run through it at full speed,
-and only the brake line ever stops you. Set it, and the band becomes a lower
-gear, one hold per tool call taken while still under the pace line, so the brake
-line is approached slowly and often not reached at all.
+`--band-delay` is what one hold costs *inside* the band, and it defaults to 180
+— three minutes, one hold per tool call taken while still under the pace line,
+so the brake line is approached slowly and often not reached at all. Set it to
+`null` (`--no-band-delay`) and the band is pure release hysteresis instead: you
+run through it at full speed, and only the brake line ever stops you.
+
+So the shipped default is the lower gear, not the free run. A band crossed at
+full speed is spent almost immediately, and what follows is the long hold the
+band was added to avoid; three minutes a call is short against every prompt
+cache TTL, so the crawl stays warm. Both numbers are in `defaults`, so
+`niceclaude on ... --band 0 --no-band-delay` is how one folder opts out.
 
 `--max-delay` is unchanged and keeps its old meaning, which makes four corners
 worth knowing. Over the brake line with no cap, the hook holds until the
 throttle line catches up; with a cap it holds that long and then proceeds while
-still over the line, as before. Inside the band with no `--band-delay`, nothing
-holds at all; with one, a hold costs `band_delay`, or `min(band_delay,
-max_delay)` where the cap is the smaller. The two are not alternatives — the
+still over the line, as before. Inside the band a hold costs `band_delay`, or
+`min(band_delay, max_delay)` where the cap is the smaller; with `band_delay`
+null, nothing holds at all. The two are not alternatives — the
 tighter one wins.
 
 Read against each other, they differ in what they spend. `--max-delay` buys
@@ -407,9 +413,11 @@ Do not remove the field to lift the limit: omitted, it reverts to the hook
 default of ten minutes, which is far worse than the ceiling you were trying to
 escape.
 
-The weekly line rises about 0.52 %/h at the default margins, so sizing a band
-is no longer constrained by this — but a band still costs its width in hold
-time, so keep it small for the reasons in the section above.
+The weekly line rises about 0.52 %/h at the default margins, so a band costs
+about 1.9 h of hold per point on the weekly line: the default 7 is roughly 13 h,
+well inside the ceiling, and anything past about 25 would ask for a hold the
+harness would kill. That is the real constraint on sizing — the band spends
+nothing from the ceiling, only wall clock.
 
 To size one against a run you already have rather than by arithmetic:
 
@@ -447,19 +455,21 @@ line; too fat and it never leaves the band.
 Pure hysteresis — brake less often, and run at full speed once released:
 
 ```bash
-niceclaude on ~/projects/nightly --model opus --band 2
+niceclaude on ~/projects/nightly --model opus --band 2 --no-band-delay
 ```
 
 The full lower gear — the same hysteresis, plus a deliberate crawl between the
-lines:
+lines. This is the default shape, so it is also what you get naming neither
+knob:
 
 ```bash
 niceclaude on ~/projects/nightly --model opus --band 2 --band-delay 30
 ```
 
 `--no-band-delay` goes back to full speed through the band. Like `--no-max-delay`
-it writes an explicit `null`, so it also overrides a `band_delay` set in
-`defaults`.
+it writes an explicit `null`, so it also overrides the `band_delay` in
+`defaults` — which, since that default is now 180 rather than unset, is the only
+way to ask for pure hysteresis.
 
 `niceclaude status` reports the middle region as a state of its own, because
 calling it BRAKED would say work has stopped when it has not, and calling it

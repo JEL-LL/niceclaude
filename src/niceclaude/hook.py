@@ -28,7 +28,8 @@ import time
 from ._shared import (
     DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE,
     DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY, HOOK_LOG_PATH, bucket_pace,
-    coerce_num, normalize_enforce, MAX_STALE, NEAR_STALE, POLICY_PATH,
+    coerce_num, normalize_enforce, MAX_STALE, NEAR_STALE, off_or_num,
+    POLICY_PATH,
     STATE_PATH, model_matches, norm_path, path_within,
 )
 
@@ -150,21 +151,17 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
     # Resolved here rather than once at the start of a brake, so that -- like
     # every other knob -- a policy edit reaches an already-frozen agent within
     # one chunk instead of only on its next tool call.
-    max_delay = coerce_num(entry.get("max_delay",
-                                     defaults.get("max_delay",
-                                                  DEFAULT_MAX_DELAY)),
-                           DEFAULT_MAX_DELAY)
+    max_delay = off_or_num(entry, defaults, "max_delay", DEFAULT_MAX_DELAY)
     if max_delay is not None and max_delay < 0:
         max_delay = 0
     # The throttle line sits `band` points under the brake line. `band_delay`
-    # is what one hold costs while between them; left unset the band is pure
-    # release hysteresis and is run through at full speed.
-    band = coerce_num(entry.get("band", defaults.get("band", DEFAULT_BAND)),
-                      DEFAULT_BAND)
-    band_delay = coerce_num(entry.get("band_delay",
-                                      defaults.get("band_delay",
-                                                   DEFAULT_BAND_DELAY)),
-                            DEFAULT_BAND_DELAY)
+    # is what one hold costs while between them; written null it is pure
+    # release hysteresis and is run through at full speed. Both ship set, so
+    # both are read with off_or_num: a null in the rule means off, and has to
+    # survive a default that is no longer off itself. bucket_pace reads a null
+    # band as zero width.
+    band = off_or_num(entry, defaults, "band", DEFAULT_BAND)
+    band_delay = off_or_num(entry, defaults, "band_delay", DEFAULT_BAND_DELAY)
     if band_delay is not None and band_delay <= 0:
         # No throttle is no throttle. Read as "unset" rather than as an instant
         # release, which would write a throttle/release pair to hook.log on
@@ -196,7 +193,7 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
     # bucket that is merely in the band -- and with band_delay unset would not
     # stop anything at all -- drag someone else's hold out to its own throttle
     # crossing. On the weekly line that is ~1.94h per band point, which is a
-    # plausible way to push a hold past the hook's registered 6h timeout, at
+    # plausible way to push a hold past the hook's registered timeout, at
     # which point the harness kills it and the agent proceeds UNPACED.
     hot = []
     banded = []

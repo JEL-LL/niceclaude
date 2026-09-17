@@ -83,15 +83,25 @@ DEFAULT_MAX_DELAY = None
 # every 1% of budget, and a cold prompt cache each time. A band means one hold
 # buys a whole band's worth of running before the next one.
 #
-# 0 disables it, which is the previous behaviour exactly.
-DEFAULT_BAND = 0
+# 0 disables it, which is the previous behaviour exactly. The default is 7,
+# which is wide enough that one hold buys a meaningful run: on the weekly line
+# it is about 13h of headroom bought by a hold of the same order, against 1.68h
+# bought by a hold of 1.68h with no band. It is well inside the 48h hook
+# timeout, and it costs nothing from the ceiling -- the brake line is where it
+# always was.
+DEFAULT_BAND = 7
 
 # What one hold costs while inside the band, in seconds. None means the band is
 # pure hysteresis: you run through it at full speed and only the brake line
 # stops you. Set it and the band becomes a lower gear instead -- each tool call
 # holds this long, so you burn slowly and stay cache-warm rather than
 # alternating long dark holds with full-speed bursts.
-DEFAULT_BAND_DELAY = None
+#
+# The default is 180s, the lower gear rather than the free run, because a band
+# crossed at full speed is spent almost immediately and the next hold is the
+# full-length one the band was added to avoid. Three minutes is short against
+# every prompt cache TTL, so the crawl stays warm.
+DEFAULT_BAND_DELAY = 180
 
 # What `install` registers as the hook's `timeout`, in seconds. This is the
 # REAL ceiling on any hold: the harness kills the hook when it expires, the
@@ -202,6 +212,29 @@ def coerce_num(value, fallback):
     if n != n or n in (float("inf"), float("-inf")):
         return fallback
     return n
+
+
+def off_or_num(entry, defaults, key, fallback):
+    """Resolve a knob whose `null` means OFF rather than "not set".
+
+    `max_delay`, `band` and `band_delay` are all switches with a number on
+    them, and the CLI turns one off by writing an explicit `null` into the
+    rule (`--no-max-delay`, `--no-band-delay`) rather than by deleting the key
+    -- deleting it would inherit whatever `defaults` says, which is the
+    opposite of what the flag asked for.
+
+    That distinction only became load-bearing when the shipped defaults for
+    `band` and `band_delay` stopped being "off": with coerce_num alone, a
+    written `null` fell back to the built-in and the off switch quietly turned
+    the knob back on. So the key's PRESENCE picks the source, and a present
+    null is returned as None. Garbage still falls back, as everywhere else: an
+    unusable value is not a licence to spend.
+    """
+    for src in (entry, defaults):
+        if key in src:
+            value = src[key]
+            return None if value is None else coerce_num(value, fallback)
+    return fallback
 
 
 def model_matches(bucket_key, model):

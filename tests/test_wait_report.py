@@ -44,7 +44,7 @@ def test_bucket_pace_wake_is_the_wake_the_hook_brakes_to(tmp_path):
     implementation of the pace line is how the two would start disagreeing."""
     cwd = norm_path(str(tmp_path))
     pol = {"paths": {cwd: {"paced": True, "model": "opus"}},
-           "defaults": {"m0": 5, "m1": 8, "chunk": 15}}
+           "defaults": {"m0": 5, "m1": 8, "chunk": 15, "band": 0}}
     st = {"ts_epoch": HALFWAY, "buckets": {"session": session_bucket(90)}}
     d = hook.decide(pol, st, cwd, HALFWAY)
     p = bucket_pace(st["buckets"]["session"], HALFWAY, 5, 8)

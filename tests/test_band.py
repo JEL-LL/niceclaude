@@ -19,6 +19,10 @@ Two knobs, deliberately orthogonal:
     band_delay  what one hold costs inside the band. None means the band is
                 pure release hysteresis: run through it at full speed.
 
+Both now ship set (7 points, 180s), so a test that wants either one off says
+so: `paced(band=BAND, band_delay=None)` writes the explicit null the CLI's
+--no-band-delay writes, and inheriting is what the bare entry gets.
+
 The clock is virtual throughout, as in test_max_delay.py: a test that actually
 slept would take as long as the behaviour it is asserting.
 """
@@ -28,7 +32,9 @@ import json
 import pytest
 
 from niceclaude import hook
-from niceclaude._shared import bucket_pace, norm_path
+from niceclaude._shared import (
+    DEFAULT_BAND, DEFAULT_BAND_DELAY, bucket_pace, norm_path,
+)
 
 SESSION_WINDOW = 5 * 3600
 RESETS = 1_760_000_000                      # fixed epoch; never the real clock
@@ -392,16 +398,41 @@ def test_band_zero_reproduces_the_old_no_reset_clause_path_exactly():
                 assert new[key] == old[key], f"{key} differs at m0={m0} pct={pct}"
 
 
-def test_an_unconfigured_folder_is_a_band_zero_folder(cwd):
-    """`band` absent from the policy must mean the feature is off, not that the
-    hook falls back to something else. Compared as whole decisions, because the
-    default reaching only half of them is exactly the sort of bug that shows up
-    weeks later as an unexplained hold."""
+def test_an_unconfigured_folder_gets_the_shipped_band(cwd):
+    """`band` absent from the policy means the built-in default -- 7 points,
+    held 180s per call -- and not some third thing. Compared as whole
+    decisions, because the default reaching only half of them is exactly the
+    sort of bug that shows up weeks later as an unexplained hold.
+
+    This is what a folder paced with no band flags actually runs, so it is the
+    configuration most installs are in."""
     state = state_for({"session": session_bucket(HOT_PCT)})
     absent = hook.decide(policy_for(cwd), state, cwd, HALFWAY)
-    explicit = hook.decide(policy_for(cwd, paced(band=0)), state, cwd, HALFWAY)
+    shipped = paced(band=DEFAULT_BAND, band_delay=DEFAULT_BAND_DELAY)
+    explicit = hook.decide(policy_for(cwd, shipped), state, cwd, HALFWAY)
     assert absent == explicit
     assert absent["region"] == "over"
+    assert absent["band_delay"] == DEFAULT_BAND_DELAY
+
+
+def test_a_written_null_turns_a_knob_off_against_a_default_that_is_on(cwd):
+    """`--no-band-delay` writes `band_delay: null`, and that has to mean OFF.
+
+    Falling back on a null -- which is what a plain coerce_num does -- was
+    harmless while the built-in default was None itself, and became a silent
+    reversal the moment the default became 180: the folder that asked for a
+    free run would have been put in the lower gear by the very flag that turns
+    it off. Same for a null `band`, which must read as zero width rather than
+    as the shipped 7."""
+    state = state_for({"session": session_bucket(BAND_PCT)})
+    free = hook.decide(policy_for(cwd, paced(band=BAND, band_delay=None)),
+                       state, cwd, HALFWAY)
+    assert free["band_delay"] is None
+    assert free["braked"] is False
+
+    unbanded = hook.decide(policy_for(cwd, paced(band=None)), state, cwd,
+                           HALFWAY)
+    assert unbanded["region"] == "free"
 
 
 def test_decide_brakes_to_the_old_wake_and_says_what_it_always_said(cwd):
@@ -598,7 +629,7 @@ def test_a_band_with_no_band_delay_does_not_brake(cwd):
     being orthogonal: you can have the hysteresis without paying a per-call
     tax.
     """
-    d = hook.decide(policy_for(cwd, paced(band=BAND)),
+    d = hook.decide(policy_for(cwd, paced(band=BAND, band_delay=None)),
                     state_for({"session": session_bucket(BAND_PCT)}),
                     cwd, HALFWAY)
     assert d["braked"] is False
@@ -613,7 +644,7 @@ def test_a_free_running_band_still_reports_its_region(cwd):
     silently switch the near-line refresh off exactly where it matters, and the
     agent would sail past the brake line on data it never re-read.
     """
-    d = hook.decide(policy_for(cwd, paced(band=BAND)),
+    d = hook.decide(policy_for(cwd, paced(band=BAND, band_delay=None)),
                     state_for({"session": session_bucket(BAND_PCT)}),
                     cwd, HALFWAY)
     assert d["region"] == "band"
@@ -649,8 +680,9 @@ def test_the_near_line_refresh_fires_on_a_free_running_band(cwd, tmp_path,
     monkeypatch.setattr(hook.time, "time", clock.time)
     monkeypatch.setattr(hook.time, "sleep", clock.sleep)
 
-    policy_path.write_text(json.dumps(policy_for(cwd, paced(band=BAND))),
-                           encoding="utf-8")
+    policy_path.write_text(
+        json.dumps(policy_for(cwd, paced(band=BAND, band_delay=None))),
+        encoding="utf-8")
     _brake_start, reason = hook.run(cwd)
     assert reason == "line-caught-up"        # it did not brake...
     assert len(calls) == 1                   # ...but it did look again
@@ -790,7 +822,7 @@ def test_a_free_running_band_never_sleeps(running):
     """The band with no band_delay costs nothing at all -- not a short hold, not
     a chunk, nothing. Anything else would be a per-tool-call tax on a folder
     that only asked for release hysteresis."""
-    clock, reason = running(entry=paced(band=BAND),
+    clock, reason = running(entry=paced(band=BAND, band_delay=None),
                             buckets={"session": session_bucket(BAND_PCT)})
     assert reason == "line-caught-up"
     assert clock.naps == []
@@ -859,7 +891,8 @@ def test_max_delay_alone_does_not_cut_a_band_hold_short(running):
     """With no band_delay the band is free-running, so there is no hold for
     max_delay to cap -- the agent never stopped. max_delay's meaning is
     unchanged and it has nothing to do here."""
-    clock, reason = running(entry=paced(band=BAND, max_delay=10),
+    clock, reason = running(entry=paced(band=BAND, band_delay=None,
+                                        max_delay=10),
                             buckets={"session": session_bucket(BAND_PCT)})
     assert reason == "line-caught-up"
     assert clock.naps == []
@@ -1106,7 +1139,7 @@ def test_two_band_buckets_stay_a_band(cwd):
 def test_several_free_running_bands_still_do_not_brake(cwd):
     """...and with no band_delay, neither of them stops anything -- while both
     are still reported, so the near-line refresh sees them."""
-    d = hook.decide(policy_for(cwd, paced(band=BAND)),
+    d = hook.decide(policy_for(cwd, paced(band=BAND, band_delay=None)),
                     state_for({"session": session_bucket(BAND_PCT),
                                "week:all models": week_bucket(38)}),
                     cwd, HALFWAY)

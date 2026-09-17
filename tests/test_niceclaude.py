@@ -309,9 +309,13 @@ def test_under_the_line_is_not_braked(cwd):
 
 
 def test_exactly_at_the_line_is_not_braked(cwd):
-    # pess = pct + 1 must be strictly above the line to brake.
+    # pess = pct + 1 must be strictly above the line to brake. Band off, so the
+    # brake line is the only line and this is its edge; the throttle line's own
+    # edges are in test_band.py.
     pct = ALLOWED_AT_HALFWAY - 1
-    d = hook.decide(policy_for(cwd), state_for({"session": session_bucket(pct)}),
+    d = hook.decide(policy_for(cwd, defaults={"m0": 5, "m1": 8, "chunk": 15,
+                                              "band": 0}),
+                    state_for({"session": session_bucket(pct)}),
                     cwd, HALFWAY)
     assert d["braked"] is False
 
