@@ -127,6 +127,15 @@ overwritten. Running it twice updates in place instead of registering the hook
 twice. `niceclaude uninstall` removes exactly what it added and leaves policy and
 logs alone.
 
+`install --subagent-cache-1h` (or `--subagent-cache-5m`) also sets Claude Code's
+`subagentPromptCacheTtl` in that same file, in the same write. It is opt-in:
+without a flag the key is left exactly as found. The value written is recorded in
+`claude_settings_marker.json` in the data directory, and `uninstall` removes the
+key only if that record exists and the key still holds the value it records — a
+value you set yourself, or changed afterwards, stays. See
+[Subagents and the 5-minute cache](#subagents-and-the-5-minute-cache) for when
+either is worth it.
+
 To exempt a single session, set `NICECLAUDE_OFF` to any non-empty value:
 
 ```bash
@@ -310,6 +319,63 @@ It is no longer the only answer to the cache problem, though, and it is no
 longer the first one to reach for. A cap buys cache warmth out of the *ceiling*,
 because proceeding while over the line is exactly what it does. The next section
 buys the same warmth out of headroom you had not spent yet.
+
+### Subagents and the 5-minute cache
+
+Subagents (and workflows, teammates, compaction) get a **5-minute** prompt cache
+by default, even on a subscription; since Claude Code v2.1.242 the
+`subagentPromptCacheTtl` setting can raise it to `1h`. A hold longer than 5
+minutes may leave a subagent's cache expired, so its next step re-reads its
+context cold. `1h` comes at a price: 1h cache writes bill 2x base input against
+1.25x for 5m (reads are 0.1x either way).
+
+`on` can set that for one folder:
+
+```bash
+niceclaude on ~/projects/nightly --subagent-cache-1h    # or --subagent-cache-5m
+```
+
+That writes the key into `~/projects/nightly/.claude/settings.local.json`
+(creating it if needed, keeping every other key, and refusing a file it cannot
+parse), and records the value in the folder's rule as `subagent_cache_ttl_written`.
+`off` removes the key again — only if it still holds that value, and without
+deleting the file. `install --subagent-cache-*` does the same for your user
+settings.
+
+Unlike the pacing rule, the key does not cover the subtree: it reaches sessions
+started in that folder. Outside Windows, Claude Code keeps `settings.local.json`
+at the git repository's root (a worktree uses the main checkout's), while still
+reading one in the starting directory with the root's value winning. So if the
+folder *is* a repository root, the key also reaches sessions anywhere in that
+repository and its worktrees; if it is *inside* one, a value set in the root's
+`.claude/settings.local.json` takes precedence. `on` says which applies when it
+writes, and the advisory below reads the root's file first. Use
+`install --subagent-cache-*` to cover every folder.
+
+Claude Code adds `**/.claude/settings.local.json` to your global git excludes
+only the first time it writes the file itself, so a file `on` wrote may not be
+ignored. `on` asks git (`git check-ignore`) after writing, and if the file is not
+ignored it says so — add it to `.gitignore`. Outside a repository, or without
+git, it says nothing.
+
+Without a flag `on` writes nothing, but it prints a note when the TTL in force
+looks mismatched to the folder's `max_delay`: a hold that can run past 270s (no
+cap, or a larger one) under a 5m cache, or holds capped at 270s or less under a
+1h one. 270s rather than 300 because the TTL is counted from the cached request's
+start, not from when the hold begins. The TTL "in force" follows Claude Code's
+precedence among the sources niceclaude can see: `FORCE_PROMPT_CACHING_5M`, then
+`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`, then the repository root's
+`settings.local.json` (see above), the folder's `settings.local.json` and
+`settings.json`, then your user settings, then `ENABLE_PROMPT_CACHING_1H`. It
+does not read managed settings, `--settings`, `env` blocks inside settings files,
+or a subagent's own `cacheTtl` frontmatter, any of which can change the answer.
+
+Treat that note as a suggestion, not a verdict. Whether 1h pays depends on how
+many steps run between long holds against how large the context is — sprinting to
+the line and waking cold once can be cheaper when many steps run per wake — and a
+wider `--band` buys more steps per hold, which moves the break-even again. Your
+mileage may vary: try it on your own workload and compare `niceclaude burn` and
+`status` over a window each way.
 
 ## A second line below the first, so one hold buys more than one tick
 

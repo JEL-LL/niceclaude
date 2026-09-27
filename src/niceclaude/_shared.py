@@ -44,6 +44,11 @@ LOG_PATH = os.path.join(DATA_DIR, "usage.jsonl")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 POLICY_PATH = os.path.join(DATA_DIR, "policy.json")
 HOOK_LOG_PATH = os.path.join(DATA_DIR, "hook.log")
+# Present only while `install --subagent-cache-1h/5m` has set Claude Code's
+# `subagentPromptCacheTtl`: records which settings file and which value, so
+# `uninstall` removes that key only when it is still ours and still unchanged.
+CLAUDE_SETTINGS_MARKER_PATH = os.path.join(DATA_DIR,
+                                           "claude_settings_marker.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
 # Pace-line defaults. m0 is a starting grubstake -- the pure diagonal would

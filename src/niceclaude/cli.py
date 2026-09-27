@@ -61,12 +61,13 @@ from datetime import datetime, timedelta, timezone
 
 from . import hook
 from ._shared import (  # noqa: E402
-    CONFIG_DIR, DATA_DIR, DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
+    CLAUDE_SETTINGS_MARKER_PATH, CONFIG_DIR, DATA_DIR, DEFAULT_BAND,
+    DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
     DEFAULT_POLICY, HOME, HOOK_TIMEOUT,
     LOG_PATH, POLICY_PATH, SETTINGS_PATH,
     MAX_STALE, STATE_PATH, WINDOW_SECONDS, bucket_pace, model_matches,
-    norm_path, normalize_enforce, path_within,
+    norm_path, normalize_enforce, off_or_num, path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -705,7 +706,362 @@ def registered_in(path):
                for entry in (group.get("hooks") or []))
 
 
-def cmd_install(force):
+# --- the subagent prompt-cache TTL -------------------------------------------
+#
+# Subagents (and workflows, teammates, compaction) get a 5-minute prompt cache
+# by default, even on a subscription; since Claude Code v2.1.242 the
+# subagentPromptCacheTtl setting can raise it to 1h. That interacts with
+# holding: a hold longer than the
+# cache's life means the subagent's next step re-reads its context cold. So
+# `install` and `on` can set the key, opt-in only, because 1h cache writes bill
+# 2x base input against 1.25x for 5m -- whether that pays depends on the
+# workload, and a default here would be a guess made on the user's bill.
+
+SUBAGENT_TTL_KEY = "subagentPromptCacheTtl"
+SUBAGENT_TTLS = ("5m", "1h")
+
+# Where `on` records, in the folder's policy rule, the value it wrote to that
+# folder's settings.local.json -- so `off` removes only its own work.
+SUBAGENT_TTL_RECORD = "subagent_cache_ttl_written"
+
+# Where those records wait when `install --force` resets the rules: a
+# top-level map of folder -> value, read only by `on` and `off`. See
+# cmd_install for why this is not a stub rule.
+SUBAGENT_TTL_ORPHANS = "subagent_ttl_orphans"
+
+
+def ttl_orphans(pol):
+    """The policy's orphaned TTL records, as {norm_path(folder): value}."""
+    raw = pol.get(SUBAGENT_TTL_ORPHANS)
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if v in SUBAGENT_TTLS}
+
+
+def adopt_ttl_orphan(pol, key, entry):
+    """Move an orphaned record for `key` back into its rule, in place.
+
+    Once the folder has a rule again the record belongs there, where every
+    other path through `on` and `off` already looks for it.
+    """
+    raw = pol.get(SUBAGENT_TTL_ORPHANS)
+    if not isinstance(raw, dict) or key not in raw:
+        return
+    value = raw.pop(key)
+    if value in SUBAGENT_TTLS and SUBAGENT_TTL_RECORD not in entry:
+        entry[SUBAGENT_TTL_RECORD] = value
+    if not raw:
+        del pol[SUBAGENT_TTL_ORPHANS]
+
+
+# The longest max_delay under which a hold still lands inside a 5-minute cache.
+# Not 300: the TTL is measured from the cached request's start, not from when
+# the hook begins holding, so the model's own response and the tool call that
+# fired PreToolUse have already spent part of it. 30s is that margin.
+SUBAGENT_5M_SAFE_HOLD = 270
+
+# The environment variables that beat every settings file, so a flag that only
+# writes a settings file cannot change what they decide.
+TTL_ENV_OVERRIDES = ("FORCE_PROMPT_CACHING_5M",
+                     "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+
+
+def _env_on(value):
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def folder_settings_paths(folder):
+    """The project-scope settings files under `folder`, in precedence order:
+    settings.local.json (the one `on` writes), then settings.json."""
+    base = os.path.join(folder, ".claude")
+    return (os.path.join(base, "settings.local.json"),
+            os.path.join(base, "settings.json"))
+
+
+def _local_settings_follow_repo():
+    """Whether Claude Code moves settings.local.json to the repository root on
+    this platform. It does not on Windows. A function, not a constant, so a
+    test can take either branch on any host."""
+    return os.name != "nt"
+
+
+def _main_checkout_of(gitfile):
+    """The work tree a `.git` FILE belongs to, for repo_local_settings_root.
+
+    A linked worktree's `.git` file says `gitdir: <main>/.git/worktrees/<n>`,
+    and that directory's `commondir` names the shared `<main>/.git`, whose
+    parent is the main checkout -- where Claude Code keeps the file for every
+    worktree. Anything else with a `.git` file (a submodule, whose gitdir has
+    no `commondir`) or a shape we cannot follow is taken as its own root: the
+    file's own directory, which is at least where that checkout begins.
+    """
+    here = os.path.dirname(gitfile)
+    try:
+        with open(gitfile, encoding="utf-8") as fh:
+            line = fh.readline().strip()
+        if not line.startswith("gitdir:"):
+            return here
+        gitdir = os.path.join(here, line[len("gitdir:"):].strip())
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as fh:
+            common = os.path.normpath(os.path.join(gitdir, fh.read().strip()))
+    except OSError:
+        return here
+    if os.path.basename(common) != ".git":
+        return here
+    return os.path.dirname(common)
+
+
+def repo_local_settings_root(folder):
+    """The repository root whose .claude/settings.local.json Claude Code uses
+    for a session started in `folder`, or None when it keeps that file in the
+    starting directory itself.
+
+    Claude Code moves settings.local.json up to the git root for a session
+    started anywhere in a repository -- and, in a worktree, to the main
+    checkout's root -- except on Windows, outside a repository, and when the
+    root is the home directory. It also skips the move when the root, or its
+    .git or .claude entry, is not owned by the user; that check is NOT made
+    here, so on a shared checkout this can name a root Claude Code would not
+    use. It only steers advice, which can afford that.
+    """
+    if not _local_settings_follow_repo():
+        return None
+    here = os.path.realpath(folder)
+    while True:
+        dotgit = os.path.join(here, ".git")
+        if os.path.isdir(dotgit):
+            root = here
+            break
+        if os.path.isfile(dotgit):
+            root = _main_checkout_of(dotgit)
+            break
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+    if norm_path(root) == norm_path(HOME):
+        return None
+    return root
+
+
+def git_ignores(folder, path):
+    """Does git ignore `path`? True, False, or None when it cannot say.
+
+    Asked of git itself rather than guessed from .gitignore files, because
+    ignores also come from .git/info/exclude and the global excludes file --
+    which is exactly where Claude Code puts its own rule for this file. None
+    covers "not a repository" (128) and "no git on PATH", neither of which
+    leaves anything to warn about.
+    """
+    try:
+        rc = subprocess.run(["git", "-C", folder, "check-ignore", "-q", path],
+                            capture_output=True).returncode
+    except (FileNotFoundError, OSError):
+        return None
+    return {0: True, 1: False}.get(rc)
+
+
+def subagent_ttl_scope_note(key, ttl):
+    """Which sessions the key `on` just wrote into `key` will reach.
+
+    The pacing rule covers the whole subtree; the setting does not, and where
+    it does reach depends on whether Claude Code moves settings.local.json up
+    to a repository root (repo_local_settings_root). Inside a repository the
+    folder's own file is still read, but a value at the root wins.
+    """
+    root = repo_local_settings_root(key)
+    cover = (f"      use `install --subagent-cache-{ttl}` to cover every "
+             f"folder.")
+    if root is not None and norm_path(root) != norm_path(key):
+        local = folder_settings_paths(root)[0]
+        return (f"note: reaches sessions started in {key}; a value set in "
+                f"{local} takes precedence there;\n{cover}")
+    where = (", and anywhere in the repository and its worktrees"
+             if root is not None else "")
+    return f"note: reaches sessions started in {key}{where};\n{cover}"
+
+
+def effective_subagent_ttl(folder, env=None):
+    """The subagent prompt-cache TTL a session in `folder` would get, and why.
+
+    Returns (ttl, source), where source names the variable or file that
+    decided it, or "default". Mirrors Claude Code's own precedence: the force
+    switch, then the specific variable, then the settings files from most to
+    least local, then the general 1h switch. A value other than "5m" or "1h" is
+    ignored by Claude Code and so is skipped here too, as is a file that cannot
+    be read -- this only feeds advice, and advice must never make `on` fail.
+
+    It judges a session started AT `folder`. Inside a repository Claude Code
+    reads settings.local.json at the root (see repo_local_settings_root) and
+    still reads one in the starting directory, the root's value winning where
+    both set the key -- so the root's file is consulted first. A session
+    started in a subfolder the pacing rule also covers may see other files.
+
+    Only the sources niceclaude can see are read: not managed settings,
+    `--settings`, `env` blocks inside settings files, or a subagent's own
+    `cacheTtl` frontmatter, any of which can change the answer.
+    """
+    env = os.environ if env is None else env
+    if _env_on(env.get("FORCE_PROMPT_CACHING_5M")):
+        return "5m", "FORCE_PROMPT_CACHING_5M"
+    value = env.get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+    if value in SUBAGENT_TTLS:
+        return value, "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"
+    paths = [*folder_settings_paths(folder), claude_settings_path()]
+    root = repo_local_settings_root(folder)
+    if root is not None and norm_path(root) != norm_path(folder):
+        paths.insert(0, folder_settings_paths(root)[0])
+    for path in paths:
+        cfg, err = load_settings(path)
+        if err is None and cfg.get(SUBAGENT_TTL_KEY) in SUBAGENT_TTLS:
+            return cfg[SUBAGENT_TTL_KEY], path
+    if _env_on(env.get("ENABLE_PROMPT_CACHING_1H")):
+        return "1h", "ENABLE_PROMPT_CACHING_1H"
+    return "5m", "default"
+
+
+def recommended_subagent_ttl(max_delay):
+    """"1h" when a hold can outlast a 5-minute cache, else "5m"."""
+    if max_delay is None or max_delay > SUBAGENT_5M_SAFE_HOLD:
+        return "1h"
+    return "5m"
+
+
+def subagent_ttl_advice(max_delay, ttl, source):
+    """The note `on` prints when the folder's TTL looks mismatched to its holds.
+
+    Returns a list of lines, empty when there is nothing worth saying. Hedged
+    on purpose: whether 1h pays depends on how many steps run between long
+    holds against how big the context is -- sprinting to the line and waking
+    cold once can be the cheaper trade -- and a wider band changes how many
+    steps each hold buys. So it suggests and says how to find out, rather than
+    asserting a break-even it cannot see.
+    """
+    cap = "no limit" if max_delay is None else human_delta(max_delay)
+    test = ("      test it on your workload (`niceclaude burn` / `status` "
+            "over a window).")
+    want = recommended_subagent_ttl(max_delay)
+    if want == ttl:
+        return []
+    if source in TTL_ENV_OVERRIDES:
+        fix = f"Changing {source} (it beats settings files)"
+    else:
+        fix = f"--subagent-cache-{want}"
+    if want == "1h":
+        return [f"note: with max_delay {cap}, a hold here can outlast the "
+                f"5-minute subagent",
+                f"      prompt cache. {fix} may pay off, but 1h writes bill "
+                f"2x vs 1.25x,",
+                "      and steps per wake and --band move the break-even. "
+                "Your mileage may vary:",
+                test]
+    return [f"note: max_delay {cap} keeps holds under the 5-minute cache, so "
+            f"the 1h subagent",
+            f"      TTL from {source} is likely extra cost (1h writes bill 2x "
+            f"vs 1.25x).",
+            f"      {fix} may be cheaper, though steps per wake and --band "
+            f"move the",
+            "      break-even. Your mileage may vary:",
+            test]
+
+
+def subagent_ttl_flag_note(max_delay, written, env=None):
+    """At most one line for `on` when a TTL flag WAS given.
+
+    The flag is always obeyed -- the user asked -- so this never argues at
+    length. It speaks up only when an environment variable will overrule the
+    file just written, or when the choice cuts against the holds this folder
+    takes.
+    """
+    env = os.environ if env is None else env
+    # The force switch beats the specific variable, so when it is on it alone
+    # decides: checking the variable too would warn about an override that
+    # the force switch has itself already overruled.
+    if _env_on(env.get("FORCE_PROMPT_CACHING_5M")):
+        if written != "5m":
+            return ("note: FORCE_PROMPT_CACHING_5M is set in this shell and "
+                    "overrides this setting.")
+    else:
+        value = env.get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+        if value in SUBAGENT_TTLS and value != written:
+            return ("note: CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL is set in "
+                    "this shell and overrides this setting.")
+    if recommended_subagent_ttl(max_delay) != written:
+        cap = "no limit" if max_delay is None else human_delta(max_delay)
+        return (f"note: set {written} as asked; with max_delay {cap} that may "
+                f"cost more than it saves -- worth testing.")
+    return None
+
+
+def release_subagent_ttl(cfg, written, where):
+    """Remove the TTL key from `cfg` if it is still the value niceclaude wrote.
+
+    Returns (changed, message-or-None). `written` None means niceclaude has no
+    record of setting it, so a key present is the user's and stays. A value
+    that differs from the record is also the user's -- they changed it after
+    us -- and stays too; only an exact match is ours to take back.
+    """
+    present = SUBAGENT_TTL_KEY in cfg
+    current = cfg.get(SUBAGENT_TTL_KEY)
+    if written is not None and present and current == written:
+        del cfg[SUBAGENT_TTL_KEY]
+        return True, f"removed {SUBAGENT_TTL_KEY} ({written}) from {where}"
+    if not present:
+        return False, None
+    if written is None:
+        return False, (f"left {SUBAGENT_TTL_KEY} ({json.dumps(current)}) in "
+                       f"{where}: niceclaude did not set it")
+    return False, (f"left {SUBAGENT_TTL_KEY} in {where}: it is now "
+                   f"{json.dumps(current)}, not the {written} niceclaude wrote")
+
+
+def _marker_key(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def load_ttl_marker():
+    """The install marker as a map of settings file -> the TTL written there.
+
+    A map, not one record, because `install` can run under more than one
+    CLAUDE_CONFIG_DIR: a single record would let the second install erase the
+    first one's, and the first `uninstall` would then leave its key behind.
+    The earlier single-record shape ({"settings": path, key: value}) is still
+    read, so a marker written by it is not orphaned.
+    """
+    try:
+        with open(CLAUDE_SETTINGS_MARKER_PATH, encoding="utf-8") as fh:
+            marker = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(marker, dict):
+        return {}
+    if isinstance(marker.get("settings"), str):
+        marker = {marker["settings"]: marker.get(SUBAGENT_TTL_KEY)}
+    return {_marker_key(k): v for k, v in marker.items()
+            if isinstance(k, str) and v in SUBAGENT_TTLS}
+
+
+def save_ttl_marker(marker):
+    """Write the marker map, or remove the file once nothing is recorded."""
+    if marker:
+        write_atomic(CLAUDE_SETTINGS_MARKER_PATH, json.dumps(marker, indent=2))
+    else:
+        try:
+            os.remove(CLAUDE_SETTINGS_MARKER_PATH)
+        except OSError:
+            pass
+
+
+def read_ttl_marker(target):
+    """The TTL `install` wrote into `target`, per its marker, or None.
+
+    Only this file's entry counts: one recorded for another settings file --
+    CLAUDE_CONFIG_DIR pointed elsewhere then -- says nothing about this one.
+    """
+    return load_ttl_marker().get(_marker_key(target))
+
+
+def cmd_install(force, subagent_ttl=None):
     """Register the hook in Claude Code's user settings.
 
     This writes into ~/.claude/settings.json, so `niceclaude on <folder>` is all
@@ -723,6 +1079,11 @@ def cmd_install(force):
 
     The fragment is still written, for anyone who wants foreground sessions to
     be not merely exempt but hook-free.
+
+    `subagent_ttl` ("5m"/"1h", from --subagent-cache-*) also sets Claude Code's
+    subagentPromptCacheTtl, in the same write as the hook. Only when asked:
+    None leaves the key exactly as found. The fragment never carries it -- it
+    is a user preference, not part of the hook's registration.
     """
     command = hook_command()
     if not command:
@@ -734,7 +1095,30 @@ def cmd_install(force):
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
     if not os.path.exists(POLICY_PATH) or force:
-        save_policy(json.loads(json.dumps(DEFAULT_POLICY)))
+        fresh = json.loads(json.dumps(DEFAULT_POLICY))
+        # A reset forgets every rule, but a rule's TTL record is the only
+        # thing that lets `off` take back what `on --subagent-cache-*` wrote
+        # into that folder. The records survive in a top-level map rather
+        # than as unpaced stub rules: a stub is NOT inert, because the longest
+        # matching rule wins whether or not it is paced, so a stub under a
+        # later `on` of its parent would silently carve that subtree out.
+        if force and os.path.exists(POLICY_PATH):
+            # Best-effort. --force is how a mangled policy gets repaired, so
+            # a policy.json that parses but has the wrong shape must not stop
+            # it; losing the records then is the lesser harm.
+            kept = {}
+            try:
+                old = load_policy()
+                kept.update(ttl_orphans(old))
+                for k, rule in (old.get("paths") or {}).items():
+                    if isinstance(rule, dict) and \
+                            rule.get(SUBAGENT_TTL_RECORD) in SUBAGENT_TTLS:
+                        kept[norm_path(k)] = rule[SUBAGENT_TTL_RECORD]
+            except (AttributeError, TypeError, ValueError, OSError):
+                kept = {}
+            if kept:
+                fresh[SUBAGENT_TTL_ORPHANS] = kept
+        save_policy(fresh)
 
     fragment = {"hooks": {
         ev: [{"matcher": "*", "hooks": [
@@ -758,12 +1142,37 @@ def cmd_install(force):
               f"       Refusing to rewrite a shape we do not understand.",
               file=sys.stderr)
         return 1
-    if changed:
+
+    ttl_line = None
+    ttl_changed = False
+    if subagent_ttl is not None:
+        had = SUBAGENT_TTL_KEY in cfg
+        before = cfg.get(SUBAGENT_TTL_KEY)
+        ttl_changed = not had or before != subagent_ttl
+        ours = read_ttl_marker(target) == subagent_ttl
+        cfg[SUBAGENT_TTL_KEY] = subagent_ttl
+        if ttl_changed:
+            was = json.dumps(before) if had else "unset"
+            ttl_line = f"{SUBAGENT_TTL_KEY} = {subagent_ttl}  (was {was})"
+        else:
+            ttl_line = f"{SUBAGENT_TTL_KEY} = {subagent_ttl}  (already set)"
+
+    if changed or ttl_changed:
         write_atomic(target, json.dumps(cfg, indent=2) + "\n")
+    # After the settings write, so a failure between the two leaves no marker
+    # claiming a value that never landed. A value that was already there and
+    # not ours is NOT claimed: uninstall would then take back the user's own
+    # setting. A marker is written only for what this command put in the file.
+    if ttl_changed or (subagent_ttl is not None and ours):
+        marker = load_ttl_marker()
+        marker[_marker_key(target)] = subagent_ttl
+        save_ttl_marker(marker)
 
     print(f"hook:     {command}")
     print(f"settings: {target}"
           f"{'' if changed else '  (already registered)'}")
+    if ttl_line:
+        print(f"          {ttl_line}")
     print(f"fragment: {SETTINGS_PATH}  (optional, for --settings)")
     print(f"policy:   {POLICY_PATH}")
     print("\nnext:")
@@ -788,11 +1197,26 @@ def cmd_uninstall():
         print(f"error: {err}", file=sys.stderr)
         return 1
 
-    if unsplice_hook(cfg):
+    unhooked = unsplice_hook(cfg)
+    # The subagent TTL comes out only if `install` put it there and nobody has
+    # changed it since; either way the marker is spent, since what it recorded
+    # no longer stands once this file is rewritten or found edited.
+    written = read_ttl_marker(target)
+    ttl_changed, ttl_msg = release_subagent_ttl(cfg, written, target)
+    if unhooked or ttl_changed:
         write_atomic(target, json.dumps(cfg, indent=2) + "\n")
+    if written is not None:
+        # This file's entry only: another config dir's record still stands.
+        marker = load_ttl_marker()
+        marker.pop(_marker_key(target), None)
+        save_ttl_marker(marker)
+
+    if unhooked:
         print(f"removed the hook from {target}")
     else:
         print(f"no niceclaude hook registered in {target}")
+    if ttl_msg:
+        print(ttl_msg)
 
     if os.path.exists(SETTINGS_PATH):
         os.remove(SETTINGS_PATH)
@@ -908,10 +1332,25 @@ def _watch_loop(interval):
 
 def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
            no_max_delay=False, band=None, band_delay=None,
-           no_band_delay=False):
+           no_band_delay=False, subagent_ttl=None):
     pol = load_policy()
     key = norm_path(path)
+    # Checked before anything is written, so a settings file we refuse to
+    # touch leaves the policy unchanged too rather than half-applying `on`.
+    if subagent_ttl is not None:
+        local_path = folder_settings_paths(key)[0]
+        if not os.path.isdir(key):
+            print(f"error: {key} is not a directory; not writing "
+                  f"{local_path}", file=sys.stderr)
+            return 1
+        local_cfg, err = load_settings(local_path)
+        if err:
+            print(f"error: {err}\n"
+                  f"       Refusing to overwrite it. Fix or move the file and "
+                  f"rerun.", file=sys.stderr)
+            return 1
     entry = pol["paths"].get(key, {})
+    adopt_ttl_orphan(pol, key, entry)
     entry["paced"] = True
     if model:
         entry["model"] = model
@@ -942,12 +1381,65 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
         entry["band_delay"] = None
     elif band_delay is not None:
         entry["band_delay"] = band_delay
+
+    ttl_line = None
+    ttl_notes = []
+    if subagent_ttl is not None:
+        before = local_cfg.get(SUBAGENT_TTL_KEY)
+        if SUBAGENT_TTL_KEY not in local_cfg or before != subagent_ttl:
+            was = (json.dumps(before) if SUBAGENT_TTL_KEY in local_cfg
+                   else "unset")
+            local_cfg[SUBAGENT_TTL_KEY] = subagent_ttl
+            # The settings file first, then the policy that records it: a
+            # failure between them then leaves no record claiming a write
+            # that never happened.
+            write_atomic(local_path, json.dumps(local_cfg, indent=2) + "\n")
+            entry[SUBAGENT_TTL_RECORD] = subagent_ttl
+            ttl_line = (f"{SUBAGENT_TTL_KEY} = {subagent_ttl} in "
+                        f"{local_path}  (was {was})")
+            ttl_notes.append(subagent_ttl_scope_note(key, subagent_ttl))
+            # Claude Code adds its own global-excludes rule for this file only
+            # the first time it writes the file itself, so one we wrote can be
+            # committed. Ask git rather than guess, and stay quiet when it is
+            # ignored or there is no repository to commit it to.
+            if git_ignores(key, local_path) is False:
+                ttl_notes.append(
+                    f"note: {local_path} is not ignored by git; Claude Code "
+                    f"adds **/.claude/settings.local.json to your global git "
+                    f"excludes only the first time it writes the file itself, "
+                    f"so add it to .gitignore.")
+        else:
+            # Already this value. Ours only if the record says so; otherwise
+            # it is the user's, and claiming it would let `off` take it away.
+            if entry.get(SUBAGENT_TTL_RECORD) != subagent_ttl:
+                entry.pop(SUBAGENT_TTL_RECORD, None)
+            ttl_line = (f"{SUBAGENT_TTL_KEY} = {subagent_ttl} in "
+                        f"{local_path}  (already set)")
+
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
     if not entry.get("model"):
         print("note: no model declared. The hook cannot discover the running "
               "model, so the per-model weekly bucket will not be enforced.")
+
+    # The max_delay the hook will actually apply here, resolved the way the
+    # hook resolves it -- a rule's null means no cap, not "inherit".
+    eff_delay = off_or_num(entry, pol.get("defaults") or {}, "max_delay",
+                           DEFAULT_MAX_DELAY)
+    if eff_delay is not None and eff_delay < 0:
+        eff_delay = 0
+    if ttl_line:
+        print(ttl_line)
+        for line in ttl_notes:
+            print(line)
+        note = subagent_ttl_flag_note(eff_delay, subagent_ttl)
+        if note:
+            print(note)
+    else:
+        ttl, source = effective_subagent_ttl(key)
+        for line in subagent_ttl_advice(eff_delay, ttl, source):
+            print(line)
     return 0
 
 
@@ -955,10 +1447,35 @@ def cmd_off(path):
     pol = load_policy()
     key = norm_path(path)
     entry = pol["paths"].get(key, {})
+    adopt_ttl_orphan(pol, key, entry)
     entry["paced"] = False
+
+    # Undo `on --subagent-cache-*`, but only its own write. With no record
+    # there is nothing of ours in that file and it is not even opened.
+    ttl_msg = None
+    written = entry.get(SUBAGENT_TTL_RECORD)
+    if written is not None:
+        local_path = folder_settings_paths(key)[0]
+        local_cfg, err = load_settings(local_path)
+        if err:
+            # The record is kept, so a later `off` can finish the job once
+            # the file is readable again. Unpacing itself must not wait on it.
+            ttl_msg = f"left {SUBAGENT_TTL_KEY} alone: {err}"
+        else:
+            changed, ttl_msg = release_subagent_ttl(local_cfg, written,
+                                                    local_path)
+            if changed:
+                # The key only: an emptied file and its .claude/ stay, since
+                # either may have existed before `on` and neither costs a thing.
+                write_atomic(local_path,
+                             json.dumps(local_cfg, indent=2) + "\n")
+            entry.pop(SUBAGENT_TTL_RECORD, None)
+
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"unpaced: {key}")
+    if ttl_msg:
+        print(ttl_msg)
     return 0
 
 
@@ -1524,11 +2041,22 @@ would rather opt sessions in than carry the hook everywhere.
 
 policy.json is created with defaults if it does not exist, and otherwise left
 alone unless you pass --force.
+
+--subagent-cache-1h or --subagent-cache-5m also sets subagentPromptCacheTtl in
+the same file. Subagents (and workflows, teammates, compaction) get a 5-minute
+prompt cache by default, even on a subscription; since Claude Code v2.1.242
+the subagentPromptCacheTtl setting can raise it to 1h. A hold longer than 5
+minutes may wake a subagent cold; 1h keeps it warm, but 1h cache writes bill
+2x base input against 1.25x. Whether that pays depends on
+the workload, so neither is the default and without a flag the key is left as
+it is. The value written is recorded in claude_settings_marker.json in the
+data directory, so `uninstall` can take back exactly that and nothing else.
 """,
         examples="""\
 examples:
   niceclaude install
   niceclaude install --force      # start over with a default policy.json
+  niceclaude install --subagent-cache-1h
 """),
 
     "uninstall": dict(
@@ -1540,6 +2068,10 @@ Removes exactly the niceclaude-hook entries `install` added to Claude Code's
 settings.json and leaves the rest of the file as it was. The settings fragment
 is deleted too. policy.json, usage.jsonl and state.json are kept, so a later
 `niceclaude install` picks up the same folders and margins.
+
+subagentPromptCacheTtl is removed only if `install --subagent-cache-*` set it
+and it still holds the value written then; a value you set, or changed since,
+is left in place and the reason printed.
 
 This stops pacing everywhere at once. To stop it for one folder use
 `niceclaude off`; to suspend every rule while keeping the hook registered use
@@ -1668,6 +2200,30 @@ tool call, taken while still under the pace line -- rather than a free run.
 
 The hook cannot discover the running model, so the per-model weekly bucket is
 enforced only when --model is declared.
+
+Subagents (and workflows, teammates, compaction) get a 5-minute prompt cache
+by default, even on a subscription; since Claude Code v2.1.242 the
+subagentPromptCacheTtl setting can raise it to 1h. A hold longer than 5
+minutes may wake a subagent cold. --subagent-cache-1h or -5m writes
+subagentPromptCacheTtl into PATH/.claude/settings.local.json and records it in
+the rule, so `off` removes only that. Without a flag nothing is written, but
+`on` notes when the TTL in force looks mismatched to this folder's max_delay:
+a hold that can pass 270s against a 5m cache, or holds capped below it under a
+1h one. 1h cache writes bill 2x base input against 1.25x, and whether that
+pays depends on steps per wake and --band, so treat the note as a suggestion
+and test it on your workload.
+
+Unlike the pacing rule, the key does not cover the subtree: it reaches
+sessions started in PATH. Outside Windows, Claude Code keeps
+settings.local.json at a git repository's root, so if PATH is that root it
+also reaches
+sessions anywhere in that repository and its worktrees, and if PATH is inside
+one, a value set in the root's settings.local.json takes precedence. Use
+`install --subagent-cache-*` to cover every folder.
+
+Claude Code adds **/.claude/settings.local.json to your global git excludes
+only the first time it writes the file itself, so `on` asks git whether the
+file is ignored and, if it is not, says to add it to .gitignore.
 """,
         examples="""\
 examples:
@@ -1675,6 +2231,7 @@ examples:
   niceclaude on ~/projects/alpha --model opus --enforce session
   niceclaude on ~/projects/nightly --max-delay 240
   niceclaude on ~/projects/nightly --band 2 --band-delay 30
+  niceclaude on ~/projects/nightly --subagent-cache-1h
   niceclaude on / --model opus              # pace everything, then carve
   niceclaude off ~/projects/urgent          #   out what should run free
 """),
@@ -1690,6 +2247,10 @@ then `off ~/work/vendor` paces everything under ~/work except vendor. The rule
 is kept rather than deleted, so a later `niceclaude on` for the same path
 restores it with its settings intact. Running agents see the change at their
 next tool call.
+
+If `on --subagent-cache-*` wrote subagentPromptCacheTtl into the folder's
+.claude/settings.local.json, `off` removes that key -- only if it still holds
+the value written, and leaving the file itself in place.
 
 To release every folder at once without touching any rule, use `niceclaude
 global off`. To exempt one session rather than one folder, start it with
@@ -1899,6 +2460,30 @@ def _command(sub, name):
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
 
+def _subagent_ttl_flags(parser, where, caveat=""):
+    """The --subagent-cache-1h / --subagent-cache-5m pair, shared by `install`
+    and `on` so the two cannot describe the same setting differently.
+
+    `caveat` is appended to the 1h help and pointed at from the 5m help, so
+    `on` can state its scope limits once without printing them twice."""
+    see_1h = ". The same caveats as --subagent-cache-1h apply" if caveat else ""
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument("--subagent-cache-1h", action="store_const", const="1h",
+                     dest="subagent_ttl",
+                     help=f"set subagentPromptCacheTtl to 1h {where}, so a "
+                          f"hold longer than 5 minutes may not leave a "
+                          f"subagent's prompt cache cold. 1h cache writes "
+                          f"bill 2x base input against 1.25x for 5m, so this "
+                          f"may or may not pay; test it on your workload. "
+                          f"Needs Claude Code v2.1.242+. Default: leave the "
+                          f"setting alone{caveat}")
+    grp.add_argument("--subagent-cache-5m", action="store_const", const="5m",
+                     dest="subagent_ttl",
+                     help=f"set subagentPromptCacheTtl to 5m {where}: the "
+                          f"cheaper TTL, and likely enough when max_delay "
+                          f"keeps every hold under about 4.5 minutes{see_1h}")
+
+
 def build_parser():
     """The parser, and the subcommand action whose `.choices` maps each command
     name to its own parser.
@@ -1920,6 +2505,7 @@ def build_parser():
     i.add_argument("--force", action="store_true",
                    help="reset policy.json to the defaults as well; without "
                         "this an existing policy is kept")
+    _subagent_ttl_flags(i, "in Claude Code's user settings.json")
     _command(sub, "uninstall")
     _command(sub, "version")
     w = _command(sub, "watch")
@@ -1997,6 +2583,15 @@ def build_parser():
                         "(the 5h window), week (the shared weekly window), "
                         "model (the per-model weekly window). Default: all "
                         "three. `status` prices the ignored ones too")
+    _subagent_ttl_flags(
+        o, "in PATH/.claude/settings.local.json",
+        ". Unlike the pacing rule it does not cover the subtree: it reaches "
+        "sessions started in PATH (and, outside Windows, the whole "
+        "repository when PATH is its root; inside a repository the root's "
+        "settings.local.json wins). Use `install --subagent-cache-*` for "
+        "every folder. If git does not ignore the file, add it to "
+        ".gitignore: Claude Code adds its own exclude only the first time "
+        "it writes the file itself")
     f = _command(sub, "off")
     f.add_argument("path",
                    help="the folder to stop pacing; subfolders follow unless "
@@ -2062,7 +2657,7 @@ def main(argv=None):
     if a.cmd == "help":
         return cmd_help(ap, sub, a.command)
     if a.cmd == "install":
-        return cmd_install(a.force)
+        return cmd_install(a.force, a.subagent_ttl)
     if a.cmd == "uninstall":
         return cmd_uninstall()
     if a.cmd == "version":
@@ -2088,7 +2683,7 @@ def main(argv=None):
     if a.cmd == "on":
         return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce,
                       a.max_delay, a.no_max_delay, a.band, a.band_delay,
-                      a.no_band_delay)
+                      a.no_band_delay, a.subagent_ttl)
     if a.cmd == "off":
         return cmd_off(a.path)
     if a.cmd == "global":

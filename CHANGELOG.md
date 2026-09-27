@@ -32,6 +32,40 @@ refactors and internal cleanups do not need a line at all.
 
 ### Added
 
+- **`--subagent-cache-1h` / `--subagent-cache-5m` on `install` and `on`.**
+  Subagents (and workflows, teammates, compaction) get a 5-minute prompt
+  cache by default, even on a subscription; since Claude Code v2.1.242 the
+  `subagentPromptCacheTtl` setting can raise it to 1h. A hold longer than 5
+  minutes may wake a subagent cold. `install` with a flag sets
+  `subagentPromptCacheTtl` in your user settings, in the same write as the
+  hook; `on <folder>` with a flag sets it in that folder's
+  `.claude/settings.local.json`. Without a flag nothing is written — 1h cache
+  writes bill 2x base input against 1.25x, and whether that pays depends on
+  the workload, so it is never on by default.
+
+  Unlike the pacing rule, the key does not cover the subtree: it reaches
+  sessions started in the folder. Outside Windows, Claude Code keeps
+  `settings.local.json` at the git repository's root, so a key written at a
+  repository root also reaches the whole repository and its worktrees, while
+  one written inside a repository is overridden by any value in the root's
+  file. `on` says which applies, and `install --subagent-cache-*` covers every
+  folder. Claude Code adds `**/.claude/settings.local.json` to your global git
+  excludes only the first time it writes the file itself, so `on` asks
+  `git check-ignore` after writing and says to add it to `.gitignore` if it
+  is not ignored.
+
+  Each write is recorded — `claude_settings_marker.json` in the data
+  directory for `install`, a `subagent_cache_ttl_written` field in the rule
+  for `on` — and `uninstall` / `off` remove the key only when that record
+  exists and the key still holds the value written. A value you set, or
+  changed afterwards, is left alone and the reason printed.
+
+  `on` without a flag now prints a hedged note when the TTL in force looks
+  mismatched to the folder's `max_delay`: holds that can pass 270s under a 5m
+  cache, or holds capped at 270s or less under a 1h one. It suggests; it does
+  not decide. Steps per wake and `--band` both move the break-even, so test on
+  your own workload before trusting either answer.
+
 - **A second pace line.** `--band PCT` draws a *throttle line* that far under
   the brake line, and a hold now runs down to *it* rather than to the brake
   line. The brake line is unchanged and still means "never above this"; all of
