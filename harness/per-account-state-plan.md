@@ -269,12 +269,15 @@ unknown key exits nonzero. The argument carries help text, which `test_help`
 requires.
 
 **`account_paths` takes the home directory from `env`, not from the process.**
-`os.path.expanduser` reads `os.environ`, so a function that ignored `env` would
-quietly test the developer's real home.
+The home builds the default dir, and a function that read the process home
+would quietly test the developer's real home.
 
 - When `env` is supplied, the default dir is
   `os.path.join(env.get('USERPROFILE') or env.get('HOME') or HOME, '.claude')`.
-- A leading `~` in `config_dir` is expanded against that same home.
+- **A `~` in `config_dir` is never expanded** (D4). Claude does not expand it,
+  so niceclaude must not either. A relative value, including one that begins
+  with a literal `~`, is resolved against the process cwd, exactly as Claude
+  resolves it.
 - **The root is resolved from `env` as well:** `NICECLAUDE_DIR` if set, else
   `LOCALAPPDATA` on `nt`, else the `env` home. That is exactly the logic of
   `_data_dir()` today, but it reads `env`. `account_paths` never reads the
@@ -323,29 +326,43 @@ must name the accounts in the registry that this affects.
 directory.**
 
 - **Empty** matches the `or` fallback `claude_settings_path()` already uses.
-- **Default** means the value's realpath-normalized form equals that of
-  `~/.claude`.
+- **Default** means `norm_config_dir` of the value equals `norm_config_dir` of
+  `<home>/.claude`.
 
 Without the default rule, anyone who exports `CLAUDE_CONFIG_DIR=~/.claude` in
 their profile loses their history on upgrade. This was Q2, and it is settled:
 map to the legacy dir by realpath comparison. Q2 records the macOS caveat.
 
-**The comparison costs 0.12–0.3ms per `norm_path` on Windows.** Review 3
+**A set-to-default value is the same account, but not quite the same Claude
+state** (Phase 0, `platform-findings.md` §15). With the variable set, even to
+`~/.claude`, Claude reads and writes `$CLAUDE_CONFIG_DIR/.claude.json` and
+ignores `~/.claude.json`; it created `~/.claude/.claude.json` on first use. The
+credentials and the login are the same, so the usage and the budget are the
+same, and mapping to the legacy data dir stays right. The difference shows up
+in two places: Phase 3's diagnostic identity reader, and D10's rule that a
+default key rebinds nothing.
+
+The "Default" comparison, and every other normalization of a config dir, uses
+`_shared.norm_config_dir` (D4), not `norm_path`.
+
+**The comparison costs 0.12–0.3ms per normalization on Windows.** Review 3
 measured the lower figure for `norm_path`, and the plan's own measurement of
-bare `realpath` gave the higher. Two things keep it cheap:
+bare `realpath` gave the higher. `norm_config_dir` costs the same, being
+`norm_path` less its `expanduser`. Two things keep it cheap:
 
 - **Compare `normcase(normpath())` of both sides first.**
   - Equal means default, and no `realpath` runs.
   - Unequal settles nothing, because a symlinked spelling may still be the
-    default. Both sides then go through `norm_path`. The config dir's result
-    is needed for the key anyway, and the default's comes from the cache.
+    default. Both sides then go through `norm_config_dir`. The config dir's
+    result is needed for the key anyway, and the default's comes from the
+    cache.
 - **Cache the normalized default per home, not per process.** The cache is a
-  one-entry map from a home string to `norm_path(<home>/.claude)`. The home
+  one-entry map from a home string to `norm_config_dir(<home>/.claude)`. The home
   string is the one the default was built from: `USERPROFILE` or `HOME` from
   `env`, else the module's `HOME`.
   - A call whose home differs recomputes the default and replaces the entry.
   - In the hook the home never changes within a process, so this is still at
-    most one `norm_path` per process.
+    most one normalization of the default per process.
   - In the suite, a test that redirects the home gets a default built from
     `tmp_path`. A per-process cache would instead be filled at import, from
     the developer's real `~/.claude`, because conftest sets a non-default
@@ -358,11 +375,26 @@ unchanged, keeps `conftest.py` and `smoke_installed.py` unchanged, and keeps
 decision 16's one-bind-mount property. Two accounts sharing one `NICECLAUDE_DIR`
 are separated by the stamp (D6) and the log filter (D11), not by the path.
 
-**D4. Normalization is `norm_path`'s steps, applied after `~` is expanded
-against the `env` home.** `norm_path` itself calls `expanduser`, which reads
-`os.environ`. So a leading `~` is first replaced with the `env` home (§5,
-*Paths*), which makes `expanduser` a no-op. The remaining steps are exactly
-`norm_path`'s: `realpath`, `normpath`, `normcase`.
+**D4. A config dir is normalized by `norm_config_dir`, which never expands
+`~`.** The function is exactly:
+
+```python
+def norm_config_dir(value):
+    return os.path.normcase(os.path.normpath(os.path.realpath(value)))
+```
+
+`realpath` makes a relative value absolute against `os.getcwd()`, and resolves
+symlinks. There is deliberately no `expanduser`.
+
+**This is not `norm_path`.** `norm_path` expands `~`, and that is right for
+what it is used for: folder paths given to `on`, `off` and `status`, and the
+hook's `cwd`. A user typing `niceclaude on ~/proj` means their home. It is
+wrong for `CLAUDE_CONFIG_DIR`, because Phase 0 showed that Claude does not
+expand it (`platform-findings.md` §15). With `CLAUDE_CONFIG_DIR='~/.claude'`
+set from PowerShell, Claude treated the value as relative, created
+`<cwd>\~\.claude\`, and started "Not logged in". `norm_path` would have keyed
+that as the default account. `norm_path` must never be applied, unmodified, to
+`CLAUDE_CONFIG_DIR`.
 
 - Trailing separators are stripped.
 - Symlinks resolve on both sides of the default comparison.
@@ -370,15 +402,23 @@ against the `env` home.** `norm_path` itself calls `expanduser`, which reads
   one key through `normpath` and `normcase`.
 - `normcase` folds case on Windows only. On macOS a differently cased spelling
   gets a different slug, which costs a split history, not mis-pacing.
-- A relative value is resolved against the process's cwd, which differs per
-  session. That is a misconfiguration, and `status` warns about it.
+- **A relative value, including a literal `~`, is resolved against the process
+  cwd,** as Claude resolves it. That is a misconfiguration, and `status` warns
+  about it. It is also an edge case in which the session has no login at all.
+  No credentials exist in a fresh cwd-relative dir, so Claude starts "Not
+  logged in", and there is nothing to pace.
+- **Accepted divergence.** The hook's cwd can differ from Claude's launch cwd
+  after `/cd`, so for a relative value the hook's key may then differ from the
+  directory Claude is really using. That is accepted and not chased: it needs
+  a relative `CLAUDE_CONFIG_DIR` that is also logged in, which is already a
+  misconfiguration `status` warns about.
 
 **The key must follow Claude, because the stamp cannot catch a disagreement
-between niceclaude and Claude.** If niceclaude expands a literal `~` and Claude
-does not, the two are talking about different directories, and every
-niceclaude process agrees with the others while all of them disagree with
-Claude. Phase 0 checks what Claude does with a literal `~`, and the key follows
-that.
+between niceclaude and Claude.** If the two resolve the variable differently,
+they are talking about different directories, and every niceclaude process
+agrees with the others while all of them disagree with Claude. Phase 0 settled
+the one case that was in doubt: Claude does not expand a literal `~`, so
+neither does `norm_config_dir`.
 
 There is no MSYS drive translation. Measured here, Git Bash hands a native
 process `C:/Users/...` for an exported `/c/Users/...`, which `normpath` already
@@ -555,18 +595,25 @@ hook without `CLAUDE_CONFIG_DIR`. If they do, the hook derives the config dir
 from `transcript_path`.
 
 **The config dir is the parent of the nearest ancestor named `projects`.** It
-is not a fixed number of `dirname`s up. A transcript has two shapes, and both
-exist on this machine:
+is not a fixed number of `dirname`s up. A transcript has two shapes on disk:
 
-- `<config>/projects/<slug>/<session>.jsonl` in the main agent;
-- `<config>/projects/<slug>/<session>/subagents/agent-<id>.jsonl` in a
+- `<config>/projects/<slug>/<session>.jsonl` for the main agent;
+- `<config>/projects/<slug>/<session>/subagents/agent-<id>.jsonl` for a
   subagent.
+
+Phase 0 (`platform-findings.md` §15) found that on 2.1.282 a subagent's
+`SubagentStart` and `PreToolUse` carry the parent's `<session>.jsonl` in
+`transcript_path`, with the subagent's `agent_id`. `SubagentStop` is
+described in the binary as adding `agent_transcript_path`; it was not probed,
+and D10 reads only `transcript_path`. The walk is kept anyway, because it
+gives the right answer for either shape and costs nothing if a later version
+starts sending the subagent's own file.
 
 A path with no `projects` component yields no candidate.
 
 **The walk is string work, but the default-account test after it is not.**
 Finding `projects` needs no I/O. Deciding whether the result is the default
-account needs `norm_path` on both sides, at 0.12–0.3ms each, with the
+account needs `norm_config_dir` on both sides, at 0.12–0.3ms each, with the
 short-circuit and cache described under D2.
 
 **Precedence.** The environment wins when `CLAUDE_CONFIG_DIR` is set and
@@ -597,9 +644,11 @@ A payload without
   That rule is load-bearing. For a default-account user every
   `transcript_path` sits under `~/.claude/projects`. Rebinding on it would run
   every default refresh as `claude -p /usage` with `CLAUDE_CONFIG_DIR`
-  explicitly set, which today runs with it unset. Q2's caveat says a set
-  variable may not mean the same login, and Phase 0 B has not shown that it
-  does. If it does not, every default refresh fails and pacing freezes.
+  explicitly set, which today runs with it unset. Phase 0 showed the login is
+  the same, but with the variable set Claude switches to
+  `$CLAUDE_CONFIG_DIR/.claude.json` (`platform-findings.md` §15). Rebinding
+  would make every default refresh create and use `~/.claude/.claude.json`,
+  changing today's behaviour for every default user.
 - **Only a non-empty key rebinds.** `main()` then rebinds `ACCOUNT_KEY`,
   `STATE_PATH`, `HOOK_LOG_PATH` and `CONFIG_DIR_OVERRIDE` before calling `run`.
 - When the environment is set, `main()` touches nothing. A rule of "rebind
@@ -725,8 +774,9 @@ were printed, never values.
   that is the right unit for the hot path: it is what decides which
   credentials `claude` uses.
 - **Claude's global config, `oauthAccount`.** It is `~/.claude.json` when
-  `CLAUDE_CONFIG_DIR` is unset. Phase 0 confirms where it lives when the
-  variable is set. It holds `accountUuid` and `organizationUuid` (both
+  `CLAUDE_CONFIG_DIR` is unset. Phase 0 confirmed it is
+  `$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set, even when that
+  is `~/.claude` (`platform-findings.md` §15). It holds `accountUuid` and `organizationUuid` (both
   36-character UUIDs), next to fields that must not be touched: `emailAddress`,
   `displayName`, `fullName`, and others. **Use the pair,** not `accountUuid`
   alone. Limits attach to an organization seat, so one person in a personal org
@@ -784,6 +834,12 @@ and "Reviewer 2" are review rounds 1 and 2 in the log below.
 >
 > **Decision:** a `CLAUDE_CONFIG_DIR` that realpaths to the default `~/.claude`
 > maps to the legacy directory (D2).
+>
+> **Phase 0 result:** on Windows, the same credentials and login, so the same
+> usage. But Claude reads and writes `$CLAUDE_CONFIG_DIR/.claude.json` (here,
+> `~/.claude/.claude.json`) rather than `~/.claude.json`. The decision stands;
+> only Phase 3's diagnostic sees the difference. The macOS keychain question
+> is unverified.
 
 > **Q3 — Is manual migration acceptable (D9)?** The alternative is a one-shot
 > `niceclaude migrate` for single-account history. It would never be offered
@@ -862,8 +918,8 @@ unset.**
    an exported `/c/...` reaches a native process as `C:/...`, and
    `realpath('/c/...')` resolves against the current drive.
 
-**Procedure B — needs the user.** Every check with the variable *set* needs a
-logged-in config dir other than the default. The user either runs
+**Procedure B — needs the user.** Checks against a non-default dir need a
+second login. The user either runs
 `claude /login` in a scratch config dir, or uses a second account they already
 have. Then, with the same probe:
 
@@ -873,17 +929,37 @@ have. Then, with the same probe:
   the hook still sees it.
 - `claude --config-dir <dir>`, but only if `claude --help` lists the flag. It
   does not in 2.1.282.
-- A literal, unexpanded `~` in `CLAUDE_CONFIG_DIR` (D4).
-- `CLAUDE_CONFIG_DIR=~/.claude`: whether it still reads `~/.claude.json` (Q2).
+
+The two checks that were meant to point at the default dir have already run:
+one needed no login, and the other found the default dir's login
+(`platform-findings.md` §15):
+
+- A literal, unexpanded `~` in `CLAUDE_CONFIG_DIR` (D4): **not expanded.**
+  Claude resolves it against the cwd, creates `<cwd>/~/.claude/`, and reports
+  "Not logged in". No hook fires.
+- `CLAUDE_CONFIG_DIR=~/.claude` (Q2): the session starts on the default
+  credentials, and the hook sees the value verbatim. But Claude reads and
+  writes `~/.claude/.claude.json`, creating it if missing, and does **not**
+  read `~/.claude.json`.
 
 **Until Procedure B has run, the implementation assumes:**
 
 - the hook inherits `CLAUDE_CONFIG_DIR` unchanged, so D10's payload fallback
-  stays unbuilt;
-- a literal `~` is expanded, matching `norm_path`;
-- `.claude.json` lives at `$CLAUDE_CONFIG_DIR/.claude.json` when the variable
-  is set, and at `~/.claude.json` otherwise;
-- `CLAUDE_CONFIG_DIR=~/.claude` is the default login (D2).
+  stays unbuilt. This is verified for the default dir, not yet for another.
+
+Verified by Phase 0: `.claude.json` lives at `$CLAUDE_CONFIG_DIR/.claude.json`
+when the variable is set, even to the default dir, and at `~/.claude.json`
+otherwise.
+
+Refuted by Phase 0, and now resolved in the design:
+
+- "a literal `~` is expanded, matching `norm_path`". Claude does not expand
+  it, so `norm_path` would key a cwd-relative dir as the default account.
+  Resolved by D4's `norm_config_dir`.
+- "`CLAUDE_CONFIG_DIR=~/.claude` is the default login (D2)". It is the same
+  credentials, but a different `.claude.json`. Resolved in D2 and Q2: it still
+  maps to the legacy data dir, and Phase 3 notes the `.claude.json`
+  difference.
 
 Each assumption is marked in the code where it is relied on.
 
@@ -919,8 +995,15 @@ Each assumption is marked in the code where it is relied on.
 - **New tests:**
   - Unset, empty, and default `CLAUDE_CONFIG_DIR` each give today's paths
     exactly, compared against a copy of the old resolver.
-  - The same directory spelled with a trailing slash, with `~`, and (on
-    Windows) in a different case gives one slug.
+  - The same directory spelled with a trailing slash, and (on Windows) in a
+    different case, gives one slug.
+  - A literal `~` is **not** expanded. With the cwd set to `tmp_path / "cwd"`
+    (`monkeypatch.chdir`), `CLAUDE_CONFIG_DIR="~/.claude"` gives the key
+    `norm_config_dir(tmp_path / "cwd" / "~" / ".claude")`. It is non-default,
+    even though the home is redirected so that `<home>/.claude` exists.
+  - `norm_config_dir` never calls `expanduser`: a relative value resolves
+    against `os.getcwd()`, and `norm_path` is not used on a config dir
+    anywhere in `account_paths`.
   - `C:/Users/x/.claude-work` and `C:\Users\x\.claude-work` give one key on
     `nt`.
   - On POSIX, a symlink to `~/.claude` gives the legacy directory. On Windows,
@@ -929,9 +1012,9 @@ Each assumption is marked in the code where it is relied on.
     made of safe characters, and short.
   - A mixed-case basename with a space, such as `.../My Claude  Work`, becomes
     `my-claude-work-<crc8>`, pinning each of D5's five steps.
-  - `account_paths(..., env)` takes its home from `env`: with `USERPROFILE`
-    and `HOME` pointed at `tmp_path`, both the default comparison and the `~`
-    expansion use `tmp_path`, and never the real home.
+  - `account_paths(..., env)` takes its home from `env`. With `USERPROFILE`
+    and `HOME` pointed at `tmp_path`, the default comparison is against
+    `tmp_path/.claude`, never the real home.
   - With `NICECLAUDE_DIR` set, `DATA_DIR` ignores `CLAUDE_CONFIG_DIR`, but
     `ACCOUNT_KEY` still reflects it.
   - `POLICY_PATH`, `CLAUDE_SETTINGS_MARKER_PATH` and `REGISTRY_PATH` are
@@ -1149,7 +1232,18 @@ Each assumption is marked in the code where it is relied on.
     `claude_settings_path()` does: `<CLAUDE_CONFIG_DIR>/.claude.json` when
     `os.environ.get("CLAUDE_CONFIG_DIR")` is set, else `~/.claude.json`. It is
     never derived from `ACCOUNT_KEY`. Conftest's `CLAUDE_CONFIG_DIR` redirect
-    therefore keeps every in-process test off the developer's real file.
+    therefore keeps every in-process test off the developer's real file. That
+    matches Claude, which Phase 0 showed reads `$CLAUDE_CONFIG_DIR/.claude.json`
+    whenever the variable is set.
+  - **A set-to-default value can report no account.** With
+    `CLAUDE_CONFIG_DIR=~/.claude`, the reader opens `~/.claude/.claude.json`.
+    That file may be fresh, created by Claude on first use, and carry no
+    `oauthAccount` yet, so the reader reports `account: None`. The data dir is
+    still the legacy one (D2), and pacing is unaffected. This is acceptable
+    because the identity is diagnostic only. `check` must treat it as unknown,
+    not as an account change. A new test covers this: a `.claude.json` with no
+    `oauthAccount`, under a set-to-default `CLAUDE_CONFIG_DIR`, gives
+    `account: None`, and `check` reports no change.
   - Keep green, unedited: `test_sampling_health` and `test_usage_jitter`. They
     write `usage.jsonl` directly, and their records carry no `account`, so the
     identity checks in `check` must treat a missing `account` as unknown, not
@@ -1548,3 +1642,37 @@ were applied.
 - **W6 — the root in `account_paths`.** Applied. It resolves the root from
   `env` (`NICECLAUDE_DIR`, else `LOCALAPPDATA` on `nt`, else the `env` home),
   and never reads the import-time `ROOT_DIR`.
+
+### Phase 0 results: X1–X2
+
+Two Phase 0 assumptions were refuted (`platform-findings.md` §15). As D4 and
+F10 require, the key follows what Claude does.
+
+- **X1 — a literal `~` is not expanded.** Refuted assumption: "a literal `~`
+  is expanded, matching `norm_path`". With `CLAUDE_CONFIG_DIR='~/.claude'`
+  set from PowerShell, Claude treated the value as relative, created
+  `<cwd>\~\.claude\`, and started "Not logged in".
+  - D4 now specifies `norm_config_dir(value)`, which is
+    `normcase(normpath(realpath(value)))` with no `expanduser`. It is used for
+    every config-dir normalization: the key, and both sides of D2's default
+    test.
+  - `norm_path` stays as it is for folder paths and `cwd`, but is never
+    applied, unmodified, to `CLAUDE_CONFIG_DIR`.
+  - §5 *Paths* no longer expands `~` against the `env` home. That supersedes
+    the `~` part of S12 and T11; the `env` home still builds the default
+    dir. The `norm_path` named in V1 and W4 for the default comparison is
+    now `norm_config_dir`.
+  - A relative value resolves against the process cwd, as Claude resolves it.
+    This is a no-login edge case. The key's possible divergence after `/cd`
+    is noted in D4 and accepted.
+  - The Phase 1 tests now pin non-expansion, where they had pinned `~`
+    expansion.
+- **X2 — a set-to-default value uses a different `.claude.json`.** Refuted in
+  part: "`CLAUDE_CONFIG_DIR=~/.claude` is the default login". The login and
+  credentials are the same, but with the variable set Claude reads and writes
+  `$CLAUDE_CONFIG_DIR/.claude.json`, and created `~/.claude/.claude.json`.
+  - The Q2 decision stands. It is the same account and the same usage, so it
+    maps to the legacy data dir. D2 and Q2 now state the difference.
+  - Phase 3 notes that its reader (W2) may find a fresh file without
+    `oauthAccount` and report `account: None`. That is diagnostic only and
+    acceptable, and a test is added.

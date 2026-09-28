@@ -428,3 +428,152 @@ previous sample. Comparing to the predecessor would tolerate a run of 1-point
 drops indefinitely, so a steady slide — which rounding cannot produce, and which
 would indicate a real parser fault — could walk down one point at a time
 unnoticed.
+
+---
+
+## 15. Where a hook learns its config dir (per-account state, Phase 0)
+
+Observed on Claude Code **2.1.282**, Windows 10, on the default account. This
+is Phase 0 of `per-account-state-plan.md`: Procedure A with `CLAUDE_CONFIG_DIR`
+unset, then the two Procedure B checks that point at the default dir. The rest
+of Procedure B is pending, below.
+
+A probe hook, registered for `PreToolUse` and `SubagentStart` through
+`claude --settings probe.json -p ...`, appended one line per event holding
+only `CLAUDE_CONFIG_DIR` from its environment, `hook_event_name`, `agent_id`
+and `transcript_path`. The prompt ran one Bash command, then one Task subagent
+that ran one Bash command. The home prefix is shown as `~`, and the project
+slug as `<slug>`. Where the spelling matters, `~` stands for exactly the
+characters it replaced, so `~/.claude` below was `C:/Users/<me>/.claude`:
+
+```
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~\\.claude\\projects\\<slug>\\b47b550a-....jsonl"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~\\.claude\\projects\\<slug>\\b47b550a-....jsonl"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "SubagentStart", "transcript_path": "~\\.claude\\projects\\<slug>\\b47b550a-....jsonl", "agent_id": "a4f5d7e133d509cd0"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~\\.claude\\projects\\<slug>\\b47b550a-....jsonl", "agent_id": "a4f5d7e133d509cd0"}
+```
+
+`tool_name` was not recorded. The tool order, read from the session
+transcript, is: the first two lines are the parent's `Bash` and `Agent` calls,
+and the last is the subagent's `Bash`.
+
+- **Claude does not inject `CLAUDE_CONFIG_DIR`.** Unset in the shell, it is
+  absent in every hook, parent and subagent alike. So "unset" in a hook means
+  the default account, not a missing value that needs filling in.
+- **The main-agent `transcript_path` is `<config>\projects\<slug>\<session>.jsonl`**,
+  with native backslashes on Windows.
+- **A subagent's hooks get the parent's `transcript_path`, not their own.**
+  Both its `SubagentStart` and its `PreToolUse` carried the parent's
+  `<session>.jsonl`, even though the subagent's own
+  `<session>\subagents\agent-<id>.jsonl` (and a `.meta.json`) exists on disk.
+  Of the fields recorded, `agent_id` alone separates them; §7 records
+  `agent_type` beside it.
+
+**What it means for D10.** The precedence rule survives: when the environment
+is unset, as here, there is nothing to override, and the payload is the only
+source. Walking up to the nearest ancestor named `projects` and taking its
+parent gives `~\.claude` for every path observed. The subagent shape was
+never seen in `transcript_path` for the two events probed, but the walk
+handles it too. Since `transcript_path` carried only the main shape, a fixed
+two `dirname`s would also have worked in this run. The nearest-`projects` walk
+costs nothing extra and still covers the subagent shape if a later version
+starts sending it. `SubagentStop` was not probed; the binary describes its
+input as adding `agent_transcript_path`, which D10 does not read.
+
+**Git Bash rewrites POSIX paths at the process boundary.** An exported
+`/c/...` reaches a native process as `C:/...`:
+
+```
+$ CLAUDE_CONFIG_DIR=/c/x python -c "import os;print(os.environ['CLAUDE_CONFIG_DIR'])"
+C:/x
+```
+
+A `/c/...` string that stays inside Python is not rewritten. `realpath` treats
+it as rooted on the *current drive*: `os.path.realpath('/c/x')` gave `F:\c\x`
+with the cwd on `F:`, and `C:\c\x` with the cwd on `C:`. So a value exported
+from Git Bash arrives already rewritten. One set from PowerShell or cmd, or
+read from a file or a payload, arrives as `/c/...` and resolves against the
+current drive.
+
+**`CLAUDE_CONFIG_DIR` set to the default dir (Q2, D2).** Two runs with the
+same probe and a one-Bash-command prompt, from the scratch dir. File checks
+were listings and mtimes only, never contents. Before either run,
+`~\.claude\.claude.json` did not exist.
+
+```
+PowerShell  CLAUDE_CONFIG_DIR=C:\Users\<me>\.claude
+{"CLAUDE_CONFIG_DIR": "~\\.claude", "hook_event_name": "PreToolUse", "transcript_path": "~\\.claude\\projects\\<slug>\\90da7258-....jsonl"}
+
+Git Bash    export CLAUDE_CONFIG_DIR=~/.claude      (the shell expands it to /c/Users/<me>/.claude)
+{"CLAUDE_CONFIG_DIR": "~/.claude", "hook_event_name": "PreToolUse", "transcript_path": "~\\.claude\\projects\\<slug>\\1b373801-....jsonl"}
+```
+
+- **Both sessions started on the default login and finished.** On Windows the
+  credentials sit inside the config dir, so pointing the variable at
+  `~\.claude` finds them.
+- **The hook sees the value verbatim.** The backslash spelling arrives as set,
+  and the Git Bash one arrives rewritten to `C:/...`, as above. Nothing is
+  normalized for the hook, so `normcase(normpath())` is what folds the two.
+- **`transcript_path` is the same shape under `~\.claude\projects`** either
+  way.
+- **With the variable set, `.claude.json` moves to
+  `$CLAUDE_CONFIG_DIR/.claude.json`, even when that is the default dir.** The
+  first run warned on stderr, then carried on:
+
+  ```
+  Claude configuration file not found at: ~\.claude\.claude.json
+  A backup file exists at: ~\.claude\backups\.claude.json.backup.<ms>
+  ```
+
+  It then created `~\.claude\.claude.json` (44 KB, growing to 47 KB on the
+  second run) and an 84-byte backup beside the others. It did not fall back
+  to `~/.claude.json`. So `CLAUDE_CONFIG_DIR=~/.claude` is the same
+  credentials but **not** the same `.claude.json` as leaving it unset. That is
+  Q2's caveat, confirmed. `~/.claude.json` is rewritten by any live default
+  session, so its mtime could not show whether these runs also touched it.
+
+**A literal, unexpanded `~` is not expanded (D4).** From PowerShell, which does
+not expand `~` in a string, with `CLAUDE_CONFIG_DIR='~/.claude'` and the cwd
+in an empty scratch dir:
+
+```
+exit=1
+Not logged in · Please run /login
+```
+
+No hook fired. Claude treated the value as a relative path and created
+`<cwd>\~\.claude\` with `backups\`, `projects\`, `sessions\`, a 692-byte
+`.claude.json` and an 84-byte backup. That scratch dir has been removed. So
+Claude resolves a literal `~` against the cwd, and `norm_path`'s
+`expanduser` resolves it to the home dir: the two disagree. It only matters if
+someone logs in there; then that session's hooks would be keyed as the
+default account.
+
+**Pending: Procedure B (needs the user).** Checks against a non-default dir
+need a second login, from `claude /login` in a scratch dir or a second
+account. Then, with the same probe:
+
+- `CLAUDE_CONFIG_DIR=<dir>`: does the hook see it? Also check where
+  `.claude.json` is written.
+- `CLAUDE_CONFIG_DIR=<dir>` with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`: does the
+  hook still see it?
+- `claude --config-dir <dir>`, but only if `claude --help` lists the flag. It
+  does not in 2.1.282.
+
+Until then, the implementation assumes:
+
+- the hook inherits `CLAUDE_CONFIG_DIR` unchanged, so D10's payload fallback
+  stays unbuilt. This is verified for the default dir in both spellings
+  above, but not yet for a non-default dir or under the scrub.
+
+Verified above, so no longer assumptions:
+
+- `.claude.json` lives at `$CLAUDE_CONFIG_DIR/.claude.json` when the variable
+  is set, and at `~/.claude.json` otherwise.
+
+Refuted above:
+
+- *a literal `~` is expanded, matching `norm_path`*: Claude does not expand
+  it.
+- *`CLAUDE_CONFIG_DIR=~/.claude` is the default login (D2)*: the
+  credentials are the same, but `.claude.json` is a different file.
