@@ -146,3 +146,82 @@ margins (`m0=5, m1=8`), enough work to push weekly utilization up to the line �
 and then inspect `hook.log` for brake/release cycles and `niceclaude plot` for
 the curve tracking the diagonal. Until that exists, treat the tool as
 mechanically sound and behaviourally unproven.
+
+---
+
+## 9. Detect the model per call, not per folder (idea, not scheduled)
+
+Filed 2026-10-02 at the user's request, to be built later; it is not part of
+issue #1.
+
+**The problem.** A folder declares its model (`--model`), and the `model`
+window is checked against that. A session that runs on one model but spawns
+subagents on another, for example Opus with Fable subagents, gets paced on
+the declared model's per-model weekly bucket for every call. Once the Fable
+bucket is used up, every call starts lagging, the Opus ones included, or the
+other way round, depending on what was declared.
+
+**The idea.** The hook payload already says who is calling. `transcript_path`
+and `session_id` are always there, and `agent_id` is there when the caller is
+a subagent. The model is the `message.model` of the last `type == "assistant"`
+record in the caller's transcript:
+
+- main agent: `transcript_path`
+- subagent: `<dirname(transcript_path)>/<session_id>/subagents/agent-<agent_id>.jsonl`,
+  and if that is missing, search under `dirname(transcript_path)` for
+  `agent-<agent_id>.jsonl`
+
+The user's bash sketch reads the file backwards (`tac`) and stops at the first
+assistant record. Write it in pure Python for portability: seek to the end and
+read blocks backwards until a parseable assistant line turns up, so the hot
+path never reads a whole transcript.
+
+**Open points for when it is built:**
+
+- Precedence. A declared folder model is either an override or a fallback
+  for when detection fails (no assistant record yet, as on the first call of
+  a fresh subagent, or a missing file). The likely answer is: detected wins,
+  declared is the fallback, and `unknown` falls back to `week` alone.
+- On the first call, a subagent's transcript may hold no assistant record
+  yet. Check what `SubagentStart` and the first `PreToolUse` actually see
+  (phase-0 style, measure it before relying on it).
+- Mapping `message.model` (e.g. `claude-fable-5-1`) onto the bucket's display
+  name: `model_matches` already does a word match, so check it against real
+  ids.
+- Cost: one backwards read per hook call, against the ~20ms budget.
+- `hook.log` should record the detected model, so a hold can be explained.
+
+---
+
+## 10. TODO: Phase 0 Procedure B for issue #1 (needs a machine with two logins)
+
+Filed 2026-10-02. The work machine has one Claude account, so this cannot run
+there. Do it from a checkout on a machine with two accounts (the user's home
+machine), then commit the results.
+
+**What to run:** Procedure B in `per-account-state-plan.md`, §8, *Phase 0*.
+Use Procedure A's probe hook (`--settings <scratch>/probe.json`, logging
+`CLAUDE_CONFIG_DIR`, `hook_event_name`, `agent_id` and `transcript_path`,
+nothing else) against the second account's config dir:
+
+1. `CLAUDE_CONFIG_DIR=<dir>`: does the hook see the value? Where is
+   `.claude.json` written?
+2. `CLAUDE_CONFIG_DIR=<dir>` plus `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`: does
+   the hook still see it?
+3. `claude --config-dir <dir>`, but only if `claude --help` lists the flag.
+
+Never copy credential files, and never print them.
+
+**Where the answer goes:** `platform-findings.md` §15, and a review-log entry
+in the plan, like X1–X2.
+
+**What depends on it:** the code assumes the hook inherits
+`CLAUDE_CONFIG_DIR` unchanged (the `ASSUMPTION (Phase 0, unverified)` comments
+in `_shared.py`). If check 2 or 3 shows the variable lost, build the plan's
+D10 payload fallback, which derives the config dir from `transcript_path`.
+Until then, a hook that has lost the variable is keyed as the default account.
+
+Also worth checking on a Mac with two accounts: `config_key` assumes that a
+config dir resolving to `~/.claude` (through a symlink, say) is the default
+login. On macOS the keychain entry may be keyed on the directory's spelling, so
+it could be the same dir but not the same login.
