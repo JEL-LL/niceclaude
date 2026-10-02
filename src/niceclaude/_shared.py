@@ -1,9 +1,10 @@
 """Paths and constants shared by the hook and the CLI.
 
-Imports `os` and nothing else. The hook is on the hot path for every tool call
-in every agent and subagent, so anything it imports transitively is a tax paid
-thousands of times a night. Measured: stdlib-only hook is 16ms, the same module
-plus argparse/re/subprocess is 29ms.
+Imports `os` and nothing else, bar `zlib`, which account_slug imports lazily
+and only for a non-default account. The hook is on the hot path for every tool
+call in every agent and subagent, so anything it imports transitively is a tax
+paid thousands of times a night. Measured: stdlib-only hook is 16ms, the same
+module plus argparse/re/subprocess is 29ms.
 """
 
 import os
@@ -11,44 +12,231 @@ import os
 HOME = os.path.expanduser("~")
 
 
-def _data_dir():
-    override = os.environ.get("NICECLAUDE_DIR")
+def _env_home(env):
+    """The home directory as `env` describes it, falling back to HOME.
+
+    This is expanduser's own lookup -- USERPROFILE on Windows, HOME elsewhere --
+    but read from `env` rather than from the process. expanduser only ever
+    consults os.environ, so a resolver handed a test's environment would
+    otherwise quietly build its defaults from the developer's real home. The
+    per-platform order keeps the import-time result identical to HOME, which is
+    what every path was built from before `env` existed.
+    """
+    if os.name == "nt":
+        return env.get("USERPROFILE") or HOME
+    home = env.get("HOME")
+    if home:
+        # posixpath.expanduser strips trailing slashes, but keeps a HOME of "/"
+        # as "/" rather than "". Match both, or HOME=/home/x// would move every
+        # path from where it was before `env` existed.
+        home = home.rstrip("/") or "/"
+    return home or HOME
+
+
+def _root_dir(env=os.environ):
+    """The shared data root: what the data dir was before accounts existed.
+
+    NICECLAUDE_DIR wins outright and verbatim, which keeps the documented
+    one-directory workaround and the test suite's redirection exactly as they
+    were.
+    """
+    override = env.get("NICECLAUDE_DIR")
     if override:
         return override
+    home = _env_home(env)
     if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+        base = env.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
         return os.path.join(base, "niceclaude")
-    return os.path.join(HOME, ".local", "share", "niceclaude")
+    return os.path.join(home, ".local", "share", "niceclaude")
 
 
-def _config_dir():
-    override = os.environ.get("NICECLAUDE_CONFIG_DIR")
+def _config_dir(env=os.environ):
+    override = env.get("NICECLAUDE_CONFIG_DIR")
     if override:
         return override
     # If the data dir has been relocated, keep config alongside it. Otherwise a
     # container would need two bind mounts to persist state, and the second one
     # is easy to forget -- losing settings.json silently unpaces everything.
-    data_override = os.environ.get("NICECLAUDE_DIR")
+    data_override = env.get("NICECLAUDE_DIR")
     if data_override:
         return os.path.join(data_override, "config")
+    home = _env_home(env)
     if os.name == "nt":
-        base = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
+        base = env.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
         return os.path.join(base, "niceclaude")
-    return os.path.join(HOME, ".config", "niceclaude")
+    return os.path.join(home, ".config", "niceclaude")
 
 
-DATA_DIR = _data_dir()
+def norm_config_dir(value):
+    """Canonical form of a CLAUDE_CONFIG_DIR value, as Claude Code resolves it.
+
+    Deliberately NOT norm_path: there is no expanduser. Claude does not expand a
+    literal `~` in the variable -- it treats `~/.claude` as relative, and makes
+    `<cwd>/~/.claude` (harness/platform-findings.md section 15) -- so expanding it
+    here would key a cwd-relative directory as the default account. The key has
+    to follow Claude, because no stamp can catch niceclaude and Claude
+    disagreeing about which directory is meant. realpath makes a relative value
+    absolute against the process cwd, as Claude does, and resolves symlinks;
+    normpath and normcase fold trailing separators, slash direction and, on
+    Windows, case.
+    """
+    return os.path.normcase(os.path.normpath(os.path.realpath(value)))
+
+
+# One entry, keyed by the home the default was built from: {home: normalized
+# <home>/.claude}. Keyed by home rather than filled once per process because the
+# suite redirects the home per test, and conftest sets a non-default
+# CLAUDE_CONFIG_DIR before anything is imported -- a per-process cache would be
+# filled at import from the developer's real ~/.claude and never refreshed. In
+# the hook the home never changes, so this is still one realpath per process.
+_default_cache = {}
+
+
+def config_key(config_dir, home):
+    """The account key for `config_dir`: "" for the default account, else its
+    norm_config_dir form.
+
+    Unset, empty, and anything that resolves to `<home>/.claude` are all the
+    default, so someone exporting CLAUDE_CONFIG_DIR=~/.claude in a profile keeps
+    their history. A set-to-default value is the same login and the same usage,
+    though Claude then reads `$CLAUDE_CONFIG_DIR/.claude.json` rather than
+    ~/.claude.json (platform-findings section 15); only the usage matters here.
+
+    The cheap comparison comes first: equal after normcase(normpath()) means the
+    default with no realpath at all. Unequal settles nothing, since a symlinked
+    spelling may still be the default, so both sides are then resolved -- the
+    config dir's result is the key anyway, and the default's comes from the
+    cache.
+    """
+    if not config_dir:
+        return ""
+    default = os.path.join(home, ".claude")
+    fold = os.path.normcase(os.path.normpath(config_dir))
+    if fold == os.path.normcase(os.path.normpath(default)):
+        return ""
+    key = norm_config_dir(config_dir)
+    cached = _default_cache.get(home)
+    if cached is None:
+        cached = norm_config_dir(default)
+        _default_cache.clear()
+        _default_cache[home] = cached
+    # ASSUMPTION (Phase 0, unverified): "resolves to the default dir" means
+    # "the default login". Verified on Windows, where the credentials live in
+    # the config dir; on macOS the keychain entry may be keyed on the
+    # directory's spelling, which would make this the same dir but not the same
+    # login.
+    return "" if key == cached else key
+
+
+_SLUG_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def account_slug(key):
+    """The directory name under `accounts/` for account key `key`.
+
+    A readable basename plus the CRC32 of the whole key, so two config dirs
+    with the same basename still differ, and the name says which account it is.
+    The basename is lowercased, stripped of leading dots, has every character
+    outside [a-z0-9._-] replaced by `-`, has runs of `-` collapsed, and is capped
+    at 32 characters: `.../My Claude  Work` becomes `my-claude-work-<crc>`.
+
+    zlib, never hashlib: a cold hashlib import measured 9-37ms against a 16ms
+    hook, zlib under 0.2ms. And zlib only for a non-empty key, so the default
+    account's hot path imports nothing new. A CRC collision among a handful of
+    accounts is not a practical concern, and the full-key stamp in state.json
+    turns one into refresh churn rather than mis-pacing.
+    """
+    if not key:
+        return ""
+    import zlib  # lazy: see above
+    crc = format(zlib.crc32(key.encode("utf-8", "surrogatepass")), "08x")
+    out = []
+    for ch in os.path.basename(key).lower().lstrip("."):
+        ch = ch if ch in _SLUG_CHARS else "-"
+        if ch == "-" and out and out[-1] == "-":
+            continue
+        out.append(ch)
+    # Stripped after the cap: an unsafe last character, or a cut just after a
+    # dash, would otherwise meet the separator below as a run of two.
+    base = "".join(out)[:32].strip("-")
+    # A basename with nothing left in it (a drive root, or all dots) would
+    # otherwise give a name that starts with the separator.
+    return f"{base}-{crc}" if base else crc
+
+
+def account_paths(config_dir, env=None):
+    """The account-scoped paths for a Claude config dir.
+
+    Returns config_key, slug, data_dir, state_path, log_path, hook_log_path and
+    pid_path. The import-time constants below are exactly this for the
+    environment's own CLAUDE_CONFIG_DIR; it exists as a function so the CLI and
+    the tests can ask about any other config dir.
+
+    Everything comes from `env` (default os.environ), never from the import-time
+    ROOT_DIR or the process home, so a test that hands it a redirected
+    environment cannot end up comparing against the developer's real ~/.claude.
+
+    The default account keeps the root itself as its data dir, so an upgrade
+    moves nothing for a single-account user. Any other account gets
+    `<root>/accounts/<slug>`, and `accounts/` keeps those out of the legacy
+    file set and in one place to list. A set NICECLAUDE_DIR is used verbatim
+    and never slugged -- it means exactly that directory -- but the key and the
+    slug are still computed, because two accounts sharing it are told apart by
+    the key rather than the path.
+    """
+    if env is None:
+        env = os.environ
+    key = config_key(config_dir, _env_home(env))
+    slug = account_slug(key)
+    root = _root_dir(env)
+    if key and not env.get("NICECLAUDE_DIR"):
+        data_dir = os.path.join(root, "accounts", slug)
+    else:
+        data_dir = root
+    return {
+        "config_key": key,
+        "slug": slug,
+        "data_dir": data_dir,
+        "state_path": os.path.join(data_dir, "state.json"),
+        "log_path": os.path.join(data_dir, "usage.jsonl"),
+        "hook_log_path": os.path.join(data_dir, "hook.log"),
+        "pid_path": os.path.join(data_dir, "daemon.pid"),
+    }
+
+
+ROOT_DIR = _root_dir()
 CONFIG_DIR = _config_dir()
 
-LOG_PATH = os.path.join(DATA_DIR, "usage.jsonl")
-STATE_PATH = os.path.join(DATA_DIR, "state.json")
-POLICY_PATH = os.path.join(DATA_DIR, "policy.json")
-HOOK_LOG_PATH = os.path.join(DATA_DIR, "hook.log")
+# ASSUMPTION (Phase 0, unverified): a hook inherits CLAUDE_CONFIG_DIR unchanged
+# from the session that spawned it, so the environment alone names the account.
+# Verified for the default dir only; a non-default dir, the
+# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 case and `claude --config-dir` still need
+# Procedure B. Until then the payload fallback (plan D10) stays unbuilt, and a
+# hook that has lost the variable is keyed as the default account.
+_ACCOUNT = account_paths(os.environ.get("CLAUDE_CONFIG_DIR"))
+ACCOUNT_KEY = _ACCOUNT["config_key"]
+
+# DATA_DIR is the account's own directory; everything account-scoped lives in
+# it. ROOT_DIR holds what every account shares.
+DATA_DIR = _ACCOUNT["data_dir"]
+LOG_PATH = _ACCOUNT["log_path"]
+STATE_PATH = _ACCOUNT["state_path"]
+HOOK_LOG_PATH = _ACCOUNT["hook_log_path"]
+
+# Shared by every account: policy is about folders, usage is about accounts, and
+# a per-account policy would leave a folder unpaced under whichever account
+# `on` was not run from.
+POLICY_PATH = os.path.join(ROOT_DIR, "policy.json")
 # Present only while `install --subagent-cache-1h/5m` has set Claude Code's
 # `subagentPromptCacheTtl`: records which settings file and which value, so
 # `uninstall` removes that key only when it is still ours and still unchanged.
-CLAUDE_SETTINGS_MARKER_PATH = os.path.join(DATA_DIR,
+# Already keyed by settings path, so one file at the root serves every account.
+CLAUDE_SETTINGS_MARKER_PATH = os.path.join(ROOT_DIR,
                                            "claude_settings_marker.json")
+# Which config dirs `install` has been run against (written from Phase 4 on).
+REGISTRY_PATH = os.path.join(ROOT_DIR, "accounts.json")
+# Byte-identical for every account -- the hook command and its timeout -- so it
+# is not keyed.
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
 # Pace-line defaults. m0 is a starting grubstake -- the pure diagonal would

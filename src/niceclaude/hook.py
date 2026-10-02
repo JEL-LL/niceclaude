@@ -43,9 +43,21 @@ def load_json(path, fallback):
 
 
 def log(msg):
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
     try:
-        with open(HOOK_LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
+        try:
+            with open(HOOK_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except FileNotFoundError:
+            # A non-default account's directory is made only by install, watch,
+            # sample, or a refresh that got as far as sampling (append_log runs
+            # whether or not the sample parsed), so the lines from a refresh
+            # that cannot start at all, or a brake or a fail-open before any
+            # refresh has run, would otherwise vanish exactly then. Only on the miss, so the common
+            # path pays no extra syscall.
+            os.makedirs(os.path.dirname(HOOK_LOG_PATH), exist_ok=True)
+            with open(HOOK_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line)
     except OSError:
         pass
 

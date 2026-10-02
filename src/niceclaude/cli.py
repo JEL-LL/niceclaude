@@ -61,13 +61,13 @@ from datetime import datetime, timedelta, timezone
 
 from . import hook
 from ._shared import (  # noqa: E402
-    CLAUDE_SETTINGS_MARKER_PATH, CONFIG_DIR, DATA_DIR, DEFAULT_BAND,
-    DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
+    ACCOUNT_KEY, CLAUDE_SETTINGS_MARKER_PATH, CONFIG_DIR, DATA_DIR,
+    DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
-    DEFAULT_POLICY, HOME, HOOK_TIMEOUT,
-    LOG_PATH, POLICY_PATH, SETTINGS_PATH,
-    MAX_STALE, STATE_PATH, WINDOW_SECONDS, bucket_pace, model_matches,
-    norm_path, normalize_enforce, off_or_num, path_within,
+    DEFAULT_POLICY, HOME, HOOK_LOG_PATH, HOOK_TIMEOUT,
+    LOG_PATH, POLICY_PATH, REGISTRY_PATH, ROOT_DIR, SETTINGS_PATH,
+    MAX_STALE, STATE_PATH, WINDOW_SECONDS, account_slug, bucket_pace,
+    model_matches, norm_path, normalize_enforce, off_or_num, path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -1221,7 +1221,14 @@ def cmd_uninstall():
     if os.path.exists(SETTINGS_PATH):
         os.remove(SETTINGS_PATH)
         print(f"removed the fragment {SETTINGS_PATH}")
-    print(f"policy and logs left alone ({DATA_DIR})")
+    # Two directories once accounts exist: the policy is shared at the root,
+    # while this account's logs and snapshot live in its own directory. They
+    # are the same directory for the default account, so name it once there.
+    if DATA_DIR == ROOT_DIR:
+        print(f"policy and logs left alone ({DATA_DIR})")
+    else:
+        print(f"policy left alone ({ROOT_DIR}), and this account's logs "
+              f"({DATA_DIR})")
     return 0
 
 
@@ -1989,6 +1996,51 @@ def cmd_version():
     return 0
 
 
+# The keys `niceclaude paths` prints, in order. A contract, not a convenience:
+# smoke_installed.py and the deploy scripts read them by these names, so one is
+# never renamed or dropped, and nothing else is ever added to the output.
+PATHS_KEYS = ("config_key", "slug", "data_dir", "state_path", "log_path",
+              "hook_log_path", "pid_path", "root_dir", "policy_path",
+              "registry_path")
+
+
+def current_paths():
+    """The paths this process actually uses, keyed as PATHS_KEYS.
+
+    Read from the module's own constants, not recomputed, so the answer is
+    what `watch`, `stop` and `refresh` in this same environment will touch. The
+    slug is not kept as a constant, so it is derived from the key through the
+    one function that makes slugs.
+    """
+    return {
+        "config_key": ACCOUNT_KEY,
+        "slug": account_slug(ACCOUNT_KEY),
+        "data_dir": DATA_DIR,
+        "state_path": STATE_PATH,
+        "log_path": LOG_PATH,
+        "hook_log_path": HOOK_LOG_PATH,
+        "pid_path": PID_PATH,
+        "root_dir": ROOT_DIR,
+        "policy_path": POLICY_PATH,
+        "registry_path": REGISTRY_PATH,
+    }
+
+
+def cmd_paths(key):
+    """`niceclaude paths [key]`: every path as JSON, or one value bare.
+
+    The bare form exists for the POSIX-sh entrypoint, which has no jq and
+    cannot count on python3 being on PATH: `$(niceclaude paths pid_path)` is
+    all it needs. An unknown key is refused by the parser before this runs.
+    """
+    paths = current_paths()
+    if key is None:
+        print(json.dumps(paths, indent=2))
+    else:
+        print(paths[key])
+    return 0
+
+
 class _VersionAction(argparse.Action):
     """`--version`, without charging every other command for the lookup.
 
@@ -2088,6 +2140,31 @@ source tree, so it reports what is actually running. A stale build beside a
 newer checkout looks identical in every other way; this is how the two are
 told apart. Exits nonzero when no distribution is installed at all.
 `niceclaude --version` prints the same thing.
+"""),
+
+    "paths": dict(
+        summary="print where this account's files live",
+        description="""\
+Print where niceclaude keeps its files for the current account.
+
+The account is the one CLAUDE_CONFIG_DIR names. Unset, empty, or pointing at
+~/.claude, it is the default account, whose files stay directly in the data
+dir, as they always have. Any other config dir gets its own directory under
+<data dir>/accounts/, so its snapshot, log, hook log and daemon pidfile are
+kept apart. policy.json and accounts.json stay at the root, shared by every
+account. A set NICECLAUDE_DIR is used as the data dir verbatim, for every
+account.
+
+With no KEY, prints all ten as a JSON object: config_key, slug, data_dir,
+state_path, log_path, hook_log_path, pid_path, root_dir, policy_path and
+registry_path. With KEY, prints that one value alone on one line, for scripts
+that cannot parse JSON. config_key and slug are empty for the default account.
+""",
+        examples="""\
+examples:
+  niceclaude paths                 # everything, as JSON
+  niceclaude paths pid_path        # one value, for a shell script
+  CLAUDE_CONFIG_DIR=~/.claude-work niceclaude paths data_dir
 """),
 
     "watch": dict(
@@ -2508,6 +2585,11 @@ def build_parser():
     _subagent_ttl_flags(i, "in Claude Code's user settings.json")
     _command(sub, "uninstall")
     _command(sub, "version")
+    pa = _command(sub, "paths")
+    pa.add_argument("key", nargs="?", choices=PATHS_KEYS, metavar="KEY",
+                    help="print only this one value, bare, on one line: one "
+                         "of " + ", ".join(PATHS_KEYS) + ". Default: all "
+                         "of them, as JSON")
     w = _command(sub, "watch")
     w.add_argument("--interval", type=int, default=60, metavar="SECONDS",
                    help="seconds between polls (default: %(default)s); each "
@@ -2662,6 +2744,8 @@ def main(argv=None):
         return cmd_uninstall()
     if a.cmd == "version":
         return cmd_version()
+    if a.cmd == "paths":
+        return cmd_paths(a.key)
     if a.cmd == "watch":
         return cmd_watch(a.interval)
     if a.cmd == "sample":

@@ -272,8 +272,15 @@ requires.
 The home builds the default dir, and a function that read the process home
 would quietly test the developer's real home.
 
-- When `env` is supplied, the default dir is
-  `os.path.join(env.get('USERPROFILE') or env.get('HOME') or HOME, '.claude')`.
+- When `env` is supplied, the default dir is `<env home>/.claude`. The env
+  home is `expanduser`'s own lookup, read from `env`: `USERPROFILE` on `nt`,
+  and `HOME` elsewhere (trailing `/` stripped, a bare `/` kept). If neither is
+  set it falls back to the module's `HOME`. This is `_env_home`. It follows
+  `expanduser` rather than trying both variables, because the old paths were
+  built from `expanduser`. `ntpath.expanduser` ignores `HOME`, and letting
+  `USERPROFILE` win on Linux (WSL with `WSLENV`) would move the default
+  account's paths. One consequence: on Windows, an `env` that sets only `HOME`
+  falls back to the real process home, so tests must redirect `USERPROFILE`.
 - **A `~` in `config_dir` is never expanded** (D4). Claude does not expand it,
   so niceclaude must not either. A relative value, including one that begins
   with a literal `~`, is resolved against the process cwd, exactly as Claude
@@ -358,8 +365,8 @@ bare `realpath` gave the higher. `norm_config_dir` costs the same, being
     cache.
 - **Cache the normalized default per home, not per process.** The cache is a
   one-entry map from a home string to `norm_config_dir(<home>/.claude)`. The home
-  string is the one the default was built from: `USERPROFILE` or `HOME` from
-  `env`, else the module's `HOME`.
+  string is the one the default was built from: the env home (`_env_home`,
+  above), else the module's `HOME`.
   - A call whose home differs recomputes the default and replaces the entry.
   - In the hook the home never changes within a process, so this is still at
     most one normalization of the default per process.
@@ -429,12 +436,16 @@ so any translation would key a directory Claude is not using.
 **D5. Slug = readable basename + CRC32 of the full key.** For example,
 `~/.claude-work` becomes `accounts/claude-work-1a2b3c4d`.
 
-- The basename is built in five steps:
+- The basename is built in six steps:
   1. lowercase it;
   2. strip leading dots;
   3. replace every character outside `[a-z0-9._-]` with `-`;
   4. collapse runs of `-` into one;
-  5. cap it at 32 characters.
+  5. cap it at 32 characters;
+  6. strip `-` from both ends after the cap. Otherwise an unsafe last
+     character, or a cut just after a dash, meets the separator as a run of
+     two. If nothing is left, as with a drive root or a name of all dots, the
+     slug is the CRC alone.
 
   For example, `My Claude Work` becomes `my-claude-work-<crc>`.
 - **Never `hashlib`.** A cold `import hashlib` measured roughly 9–37ms
@@ -986,6 +997,16 @@ Each assumption is marked in the code where it is relied on.
   - `src/niceclaude/cli.py`: the import list; the `paths` command, with its
     `COMMAND_HELP` entry (see below); and the `cmd_uninstall` message, which
     should name both directories.
+  - `src/niceclaude/hook.py`: `log` creates a missing account dir on its first
+    write. A non-default account's directory is made only by `install`,
+    `watch`, `sample`, or a `refresh` that got as far as sampling
+    (`append_log` runs whether or not the sample parsed). Without this, the
+    lines from a refresh that cannot start at all, and from a brake or
+    fail-open before any refresh has run, would be lost at exactly those
+    moments. The directory is created only on a
+    `FileNotFoundError`, so the common path pays nothing. The hook only logs
+    after its `POLICY_PATH` gate, so this can create `accounts/<slug>` and
+    nothing else.
   - A new `tests/test_account_paths.py`.
 
   The `COMMAND_HELP` entry for `paths` must meet `test_help`: a description of
@@ -1011,7 +1032,7 @@ Each assumption is marked in the code where it is relied on.
   - Two different directories give two slugs, both under `accounts/`, both
     made of safe characters, and short.
   - A mixed-case basename with a space, such as `.../My Claude  Work`, becomes
-    `my-claude-work-<crc8>`, pinning each of D5's five steps.
+    `my-claude-work-<crc8>`, pinning each of D5's six steps.
   - `account_paths(..., env)` takes its home from `env`. With `USERPROFILE`
     and `HOME` pointed at `tmp_path`, the default comparison is against
     `tmp_path/.claude`, never the real home.
