@@ -598,3 +598,114 @@ The cost is bounded precisely:
 unverified assumption on the one axis where being wrong permits overspending.
 The local-time fallback is retained as a backstop for installations that skip
 dependencies, and is documented as such rather than as the intended path.
+
+---
+
+## 19. One data directory per Claude account, one policy for all of them
+
+One machine can run several Claude accounts, by launching sessions with
+`CLAUDE_CONFIG_DIR=~/.claude-work claude`. niceclaude used to have one data
+directory whatever the account, so every account read and wrote the same
+`state.json`. Each sample was correct; what went wrong was that nothing said
+whose it was. A hook in account B paced on account A's snapshot whenever it
+was fresh, and a `watch` started in A kept it fresh forever, so B was paced
+on A's numbers almost entirely. That fails in both directions, which is worse
+than most bugs here: where A is well under its line, B spends straight past
+its own while looking paced. The histories mixed too, so `burn`, `plot` and
+`check` differenced across unrelated series.
+
+The fix keys the directory by account **and** stamps each snapshot and record
+with the account, because neither alone is enough: the path cannot separate
+two accounts that share a directory, and the stamp alone turns two busy
+accounts into steady refresh churn over one file. The full reasoning, the
+options rejected and seven rounds of review are in `per-account-state-plan.md`;
+these are the decisions, under the labels that plan and the code use.
+
+- **D1. `policy.json` is shared across accounts.** Policy is about folders,
+  usage is about accounts, and §9 already splits the two. A per-account policy
+  would bring back *looks paced, isn't*: run `on` from a shell without the work
+  account's environment and that account's hooks never see the rule. The cost
+  is that one folder cannot be paced differently per account. `install
+  --force` resets the shared file, so it names the other accounts it affects.
+- **D2. Unset, empty, or default `CLAUDE_CONFIG_DIR` is the default account,**
+  whose files stay where they always were. "Default" means it resolves to
+  `<home>/.claude`, so someone who exports `CLAUDE_CONFIG_DIR=~/.claude` keeps
+  their history. With the variable set, even to the default dir, Claude reads
+  `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`
+  (`platform-findings.md` §15). The login and the usage are the same, so the
+  data dir is too; only the diagnostic identity (D8) sees the difference. The
+  comparison does a cheap `normcase(normpath())` first, and caches the
+  resolved default per home.
+- **D3. `NICECLAUDE_DIR` wins outright and is never slugged.** An explicit data
+  dir means exactly that directory, for every account. It keeps the old
+  one-directory workaround, the test suite's redirection, and §16's one bind
+  mount. Accounts sharing it are told apart by the stamp (D6) and the log
+  filter (D11), not by the path.
+- **D4. A config dir is normalized by `norm_config_dir`,** which is
+  `normcase(normpath(realpath(value)))` and deliberately never expands `~`.
+  Claude does not expand it either: given `~/.claude` it made `<cwd>/~/.claude`
+  and started logged out (`platform-findings.md` §15). The key has to follow
+  Claude, because no stamp can catch niceclaude and Claude disagreeing about
+  which directory is meant. A relative value resolves against the cwd, as
+  Claude's does; `status` warns about it.
+- **D5. The slug is a readable basename plus the CRC32 of the full key,** as in
+  `accounts/claude-work-1a2b3c4d`. `zlib`, imported lazily and only for a
+  non-default key, never `hashlib`, whose cold import measured 9–37ms against
+  a 16ms hook. A collision only puts two accounts in one directory, where the
+  stamp turns it into churn rather than mis-pacing.
+- **D6. Every snapshot and log record carries `config_key`,** and
+  `hook.load_state` rejects a snapshot stamped by another account as `{}`. Not
+  as stale: a stale snapshot is a lower bound on usage (§12), but another
+  account's usage says nothing about ours, and `decide(degraded=True)` would
+  brake with full confidence on it. With `{}` the hook refreshes, and if that
+  fails it brakes blind, which is the honest answer. A missing or unreadable
+  file is absent, not foreign.
+- **D7. A missing stamp matches the default key only.** What old code wrote
+  stays valid for a single-account user, and a non-default account pays one
+  refresh to replace it.
+- **D8. The account identity is diagnostic, and read only by the CLI.** It is
+  the `accountUuid` and `organizationUuid` pair from Claude's global config,
+  stamped as `account` so that `check` can note a `/login` to a different
+  account inside one log, or two directories holding one login. The hook never
+  reads that file: it is tens of KB and grows with project history. Email,
+  names, tokens and credentials are never read, stored or printed.
+- **D9. Upgrade and downgrade: stop every daemon first; nothing is migrated
+  automatically.** A pre-upgrade daemon started under a work
+  `CLAUDE_CONFIG_DIR` keeps publishing unstamped snapshots into the root,
+  which the default account trusts under D7. `status` warns when it sees the
+  signs of one. A single non-default account's old history is left in the
+  root, because whether a log is one account's or two accounts' interleaved is
+  something only its owner knows, and a mixed log can never be split again.
+  `status` prints the two `mv`s that move it, and leaves the choice.
+  Downgrade needs nothing: old code ignores the new fields.
+- **D10. The config dir may also come from the hook payload — deferred.** If a
+  hook can lose `CLAUDE_CONFIG_DIR` (`claude --config-dir`, or
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`), the hook could recover the config dir
+  from `transcript_path`. Nothing yet shows that it can: the check needs a
+  second login, and is filed as Procedure B in `open-questions.md` §10. Until
+  it runs, a hook that loses `CLAUDE_CONFIG_DIR` is keyed as the default
+  account.
+- **D11. `load_log` drops only records stamped by another account.** An
+  unstamped record is kept under every key. That is looser than D7 on
+  purpose: wrongly trusting a snapshot mis-paces, and it is transient, while
+  wrongly hiding history cannot be undone. A directory two accounts shared
+  before the upgrade stays mixed for that span, as it already was.
+
+Two consequences shape the commands:
+
+- **`install` is per account, and records the account.** It writes into the
+  `settings.json` of the config dir `CLAUDE_CONFIG_DIR` names, so an account
+  nobody ran `install` from has no hook at all. It records each config dir in
+  `accounts.json` at the root, and `uninstall` marks the entry off rather than
+  dropping it. That registry is the only place a config dir is known from,
+  since a slug is one-way. `status` lists every account it knows of, checks
+  each one's hook live in its own `settings.json`, and says whether its daemon
+  is running. The registry records what `install` and `uninstall` did, not
+  whether a hook exists: one can also come from project settings or the
+  `--settings` fragment.
+- **One daemon per account.** Each account has its own pidfile, so `watch` and
+  `stop` act on the account their own environment names. One daemon sampling
+  every account was considered and dropped: it would sample serially, so one
+  hung `claude` would stall every account, and it would poll accounts whose
+  credentials had expired. `deploy/` has a templated systemd unit and a
+  `-ConfigDir` for the Windows task instead.

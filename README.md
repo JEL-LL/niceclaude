@@ -642,6 +642,65 @@ than 180s, and `burn` reports its median sampling interval and flags input that
 looks activity-driven rather than continuous. `check` is unaffected — for parser
 regression, sparse real-world samples are as good as dense ones.
 
+## More than one Claude account
+
+Sessions started with `CLAUDE_CONFIG_DIR` set belong to that config dir's
+account, with its own login and its own usage. niceclaude keeps each account's
+snapshot, history, hook log and daemon apart, so one account is never paced on
+another's numbers:
+
+- **`install` is per account.** It registers the hook in the `settings.json` of
+  the config dir `CLAUDE_CONFIG_DIR` names, and nowhere else. Run it once from
+  each account's environment; an account nobody ran it from has no hook, and is
+  not paced at all.
+- **The policy is shared.** `on`, `off`, `global` and `list` act on one
+  `policy.json` from any shell, and a folder is paced the same way under every
+  account, each measured against its own usage. `install --force` therefore
+  resets the rules of every account, and names the others it knows of.
+- **One daemon per account.** `watch` and `stop` act on the account their own
+  shell names, so start a second `watch` with the second account's
+  `CLAUDE_CONFIG_DIR` exported. `deploy/` has a templated systemd unit
+  (`niceclaude@work`) and `niceclaude-task.ps1 -ConfigDir` for this.
+- **`status` shows the accounts.** It names this shell's account, and lists
+  every account `install` has recorded or that has a directory, each with
+  whether its hook is registered and whether its daemon is running.
+- **`check` notes a change of login.** With an account's usage in one log, a
+  `/login` to a different account shows up as a `note:` line, as do two
+  account directories holding the same login. Notes are diagnostic and leave
+  the exit code alone; they name times and directories, never an account id.
+
+The default account (`CLAUDE_CONFIG_DIR` unset, or resolving to `~/.claude`)
+keeps its files exactly where they were. Any other account's live under
+`accounts/<slug>/` in the data directory; `niceclaude paths` prints them.
+Set `CLAUDE_CONFIG_DIR` to an absolute path: Claude does not expand a `~` in
+it, and resolves a relative one against wherever a session starts, so `status`
+warns about either.
+
+One limit: the account is read from the environment. A hook that has lost
+`CLAUDE_CONFIG_DIR` is keyed as the default account. Whether that can happen
+(`claude --config-dir`, or `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) is unverified
+until Procedure B in `harness/open-questions.md` §10 is run.
+
+**Upgrading.** Stop every daemon first, including any started under another
+account, and restart them after; see the CHANGELOG. If you ran one non-default
+account before this version, its history was left in the shared data
+directory, and `status` prints the two `mv` commands that move it. Run them
+only if that history is that account's alone: a log two accounts wrote cannot
+be split.
+
+**If you used `NICECLAUDE_DIR` per account as a workaround,** it keeps working
+exactly as before, with a separate policy per account. To rejoin the shared
+policy:
+
+1. `niceclaude stop` the daemon, from the shell with the old alias;
+2. drop `NICECLAUDE_DIR` from the alias, keeping `CLAUDE_CONFIG_DIR`;
+3. copy that `policy.json` to the data directory's root (`niceclaude paths
+   policy_path` names it), or re-run `niceclaude on` for each rule;
+4. restart `watch`.
+
+The account's history stays in the old directory unless you move it into the
+directory `niceclaude paths data_dir` names, as for an upgrade.
+
 ## Tests
 
 ```bash
@@ -717,8 +776,10 @@ Three bugs surfaced on that first run, all now fixed:
   direction. Affects any non-UTC machine, not just Windows.
 
 Two things to know rather than fix: the hook costs ~100ms per call there against
-~20ms on Linux (half of it the console-script launcher), and `niceclaude stop`
-leaves a stale `daemon.pid`, because `taskkill /F` cannot run the cleanup handler.
+~20ms on Linux (half of it the console-script launcher), and a daemon killed
+outside `niceclaude stop` (Task Scheduler's End, or `taskkill`) leaves a stale
+`daemon.pid`, because that cannot run the cleanup handler; `niceclaude stop`
+removes it itself.
 
 **Source convention.** U+00B7 is written as the escape `\u00b7` in code, never
 as the literal character, so every Python file stays pure ASCII. This is not

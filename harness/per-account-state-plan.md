@@ -6,7 +6,9 @@ every decision stated, how the open questions were settled, and the phases to
 build it in. Symbols are cited by name, not line number, so this survives
 edits to the code it describes.
 
-**Status: revised after seven reviews; READY.** The review log is at the end.
+**Status: Phases 1–4 built; D10 (the payload fallback) deferred until Phase 0
+Procedure B has run; the former Phase 5 dropped (Q4).** The plan was revised
+after seven reviews before any of it was built. The review log is at the end.
 
 **Test baseline before any change:** 499 passed at 543dd4d, which includes
 the subagent cache-TTL feature. Re-baseline before Phase 1 begins.
@@ -760,7 +762,7 @@ Without this, option C plus D3 still mixes histories under a shared
   unwind, and `cmd_watch`'s `finally` removes the pidfile. A templated
   `niceclaude@.service` cannot put `/` in an instance name, so it uses
   `Environment=CLAUDE_CONFIG_DIR=%h/.claude-%i`, or `systemd-escape --path`
-  with `%I`.
+  with `%f` (`%I` drops the leading `/`).
 - **`deploy/docker-entrypoint.sh`** clears `$NICECLAUDE_DATA/daemon.pid`. Under
   a non-default key without `NICECLAUDE_DIR`, that misses the pidfile silently,
   so the entrypoint asks the CLI for its paths (Phase 1's `paths` command).
@@ -1084,7 +1086,7 @@ Each assumption is marked in the code where it is relied on.
 
 ### Phase 2 — the stamp, the guard, and the log filter
 
-**Status: built, not yet committed; 568 passed (532 before).**
+**Status: built and committed (3cc8384); 568 passed (532 before).**
 
 - **Built.** The `config_key` stamp in `publish_state` and `sample_once`;
   `hook.load_state` at both load sites in `run` and in `cmd_status`, with
@@ -1247,7 +1249,7 @@ Each assumption is marked in the code where it is relied on.
 
 ### Phase 3 — the account identity (diagnostic)
 
-**Status: built, not yet committed; 597 passed (568 before).**
+**Status: built and committed (2219e10); 597 passed (568 before).**
 
 - **Built.** `cli.claude_global_config_path()`, resolved at call time like
   `claude_settings_path()`; `cli.read_account()` and `cli.account_pair()`;
@@ -1316,6 +1318,54 @@ Each assumption is marked in the code where it is relied on.
     as a change.
 
 ### Phase 4 — registry, UX, and docs
+
+**Status: built and committed; 633 passed (597 before).**
+
+- **Built.** `cli.load_registry`, `cli.record_account` (called by `install`
+  with `hook: true` and by `uninstall` with `hook: false`, keyed through
+  `account_paths(os.environ.get("CLAUDE_CONFIG_DIR"))` at call time), and
+  `cli.account_label`; `cli.print_account_header`, called by `cmd_status`
+  before the `matched is None` return, which prints the `account:` line, the
+  D4 relative-path warning (`relative_config_dir`), Phase 2's
+  `LEGACY_DAEMON_WARNING` unchanged, the D9 history hint
+  (`legacy_history_moves`, `HISTORY_CAVEAT`) and the account list
+  (`known_accounts`, `account_dir`); `cli.pid_at`, now shared by `read_pid`,
+  `legacy_daemon_suspected` and the account list, which under a shared
+  `NICECLAUDE_DIR` says the one daemon may be another account's;
+  `cmd_stop` removing the pidfile on Windows after a successful `taskkill`,
+  since `/F` skips `cmd_watch`'s cleanup; `install --force` naming
+  the other recorded accounts, in its output and its help; help for
+  `install`, `uninstall` and `status`; `deploy/niceclaude@.service`,
+  `-ConfigDir` in `niceclaude-task.ps1`, the entrypoint's
+  `niceclaude paths pid_path`, no `ExecStopPost` in `niceclaude.service`, and
+  the `deploy/README.md` fix; decision 19 in `design-decisions.md`, "State on
+  disk" in `harness/README.md`, a README section with the Q5 rejoin path, and
+  CHANGELOG entries; `tests/test_accounts_registry.py`.
+- **Not executed here.** The systemd units and the scheduled task cannot run
+  on this machine. `niceclaude-task.ps1` passes PowerShell's parser, and the
+  entrypoint passes `sh -n` and `dash -n`; neither was run for real, and no
+  task was registered.
+- **`--force` names accounts at run time, not in its help.** The help says
+  the reset reaches every account and that `install` names them; reading the
+  registry while building the parser would make `--help` depend on the
+  machine. `install --force` prints the other registered accounts.
+- **`uninstall` writes an entry even where none existed,** with `hook: false`:
+  the entry is the only record of a config dir, and an account uninstalled
+  before the registry existed is still uninstalled on purpose.
+- **A stored `hook: true` with no live hook shows as `hook NOT registered`.**
+  The plan names only the live check and the `hook: false` case; this is the
+  third, and it is the one worth seeing.
+- **The history hint guards its own moves.** It prints `mkdir -p` first when
+  the account's directory does not exist yet, and a note under a `hook.log`
+  move whose destination already exists, since `mv` would replace the
+  account's own log. Neither changes D9's four conditions or the files named.
+- **`-ConfigDir` naming the default account keeps the unchanged action,** not
+  only the plain task name: setting `CLAUDE_CONFIG_DIR`, even to the default
+  dir, changes which `.claude.json` Claude reads (D2). The value is made
+  absolute through PowerShell first, so `~` there means the user's home.
+- **The templated unit uses `%f`, not `%I`, for the escaped-path form.**
+  `systemd-escape --path` drops the leading `/`, and `%I` leaves it off;
+  `%f` puts it back.
 
 - **Scope:**
   - The registry: `install` records its account in `REGISTRY_PATH` with

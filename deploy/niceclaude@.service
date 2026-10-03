@@ -1,0 +1,63 @@
+# niceclaude poller for ONE NON-DEFAULT ACCOUNT -- templated systemd USER unit.
+#
+# One daemon per account: each CLAUDE_CONFIG_DIR has its own snapshot, log and
+# pidfile (under <data>/accounts/<slug>/), so two of these, or one of these
+# beside niceclaude.service for the default account, run side by side.
+#
+#   install:  cp niceclaude@.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now niceclaude@work
+#   logs:     journalctl --user -u niceclaude@work -f
+#
+# The instance name picks the config dir: niceclaude@work polls the account in
+# ~/.claude-work, which is what `CLAUDE_CONFIG_DIR=~/.claude-work claude` uses.
+# An instance name cannot carry a `/`, so a config dir anywhere else needs the
+# Environment= line below changed to use the escaped full path instead. %f is
+# the instance unescaped with its leading `/` put back; %I would leave it off,
+# and a relative CLAUDE_CONFIG_DIR is a different directory from every cwd:
+#
+#             Environment=CLAUDE_CONFIG_DIR=%f
+#             systemctl --user enable --now \
+#                 "niceclaude@$(systemd-escape --path /srv/claude/work)"
+#
+# The account must be installed first, from a shell with the same
+# CLAUDE_CONFIG_DIR exported: `install` is per account. `niceclaude stop` from
+# such a shell stops this daemon too, since it reads the same pidfile.
+#
+# The default account (~/.claude) uses niceclaude.service, not an instance of
+# this: CLAUDE_CONFIG_DIR set to the default dir is the same account, but makes
+# Claude read ~/.claude/.claude.json rather than ~/.claude.json.
+#
+# Lingering, as for niceclaude.service: loginctl enable-linger $USER
+
+[Unit]
+Description=niceclaude usage poller (account %i)
+After=default.target
+# `watch` exits 1 immediately if another daemon already holds this account's
+# pidfile; without a start limit Restart=always would spin on that.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Written out rather than relying on `~`: Claude does not expand a `~` in
+# CLAUDE_CONFIG_DIR, and neither does niceclaude, so the path must be absolute.
+Environment=CLAUDE_CONFIG_DIR=%h/.claude-%i
+ExecStart=%h/.local/bin/niceclaude watch --interval 60
+# Graceful stop via this account's pidfile; no process-name matching.
+ExecStop=%h/.local/bin/niceclaude stop
+# No ExecStopPost: `watch` removes its own pidfile on SIGTERM, and that
+# pidfile's path depends on the account, so it is not hardcoded here.
+
+# `watch` shells out to `claude -p /usage`, so BOTH binaries must be on this
+# PATH. Add wherever your `claude` lives if it is not one of these.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+Restart=always
+RestartSec=15
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

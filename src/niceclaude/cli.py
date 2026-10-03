@@ -66,8 +66,9 @@ from ._shared import (  # noqa: E402
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
     DEFAULT_POLICY, HOME, HOOK_LOG_PATH, HOOK_TIMEOUT,
     LOG_PATH, POLICY_PATH, REGISTRY_PATH, ROOT_DIR, SETTINGS_PATH,
-    MAX_STALE, STATE_PATH, WINDOW_SECONDS, account_slug, bucket_pace,
-    model_matches, norm_path, normalize_enforce, off_or_num, path_within,
+    MAX_STALE, STATE_PATH, WINDOW_SECONDS, account_paths, account_slug,
+    bucket_pace, model_matches, norm_path, normalize_enforce, off_or_num,
+    path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -1252,6 +1253,83 @@ def read_ttl_marker(target):
     return load_ttl_marker().get(_marker_key(target))
 
 
+# --- the account registry ----------------------------------------------------
+#
+# Which config dirs `install` has been run against, so `status` in any one
+# account can list them all. The registry is the only place a config dir is
+# known from: a slug is a one-way hash, so `accounts/<slug>` alone cannot say
+# whose directory it is. An entry records what install and uninstall did and
+# nothing more. A hook can also come from project settings or the --settings
+# fragment, so a missing entry never means "not installed", and `status`
+# checks the hook live rather than trusting the stored flag.
+
+def load_registry():
+    """{config_key: entry} from REGISTRY_PATH; {} if it is missing or not one.
+
+    Each entry is {"config_dir", "slug", "hook", "ts"}. Anything else in the
+    file is dropped here, so a hand-edited registry cannot crash `status`.
+    """
+    # RecursionError as well, as in shared_account_dirs: json raises it on a
+    # pathologically nested file, and hook.load_json, being on the hook's hot
+    # path, catches only what a sane file can raise.
+    try:
+        reg = hook.load_json(REGISTRY_PATH, {})
+    except RecursionError:
+        reg = {}
+    if not isinstance(reg, dict):
+        return {}
+    return {k: v for k, v in reg.items()
+            if isinstance(k, str) and isinstance(v, dict)}
+
+
+def record_account(hooked):
+    """Record this shell's account in the registry, with its hook state.
+
+    The key is computed from os.environ now, exactly as claude_settings_path()
+    picks its file, and never taken from the import-time ACCOUNT_KEY. The two
+    agree in ordinary use, but the suite pins ACCOUNT_KEY to the default for
+    every test, and test_subagent_cache_ttl changes CLAUDE_CONFIG_DIR between
+    two installs in one process: keyed from the import, every install would
+    land on the default account's entry.
+
+    Last writer wins, through write_atomic. Two installs racing in different
+    accounts can lose one entry, and the next install or uninstall in that
+    account puts it back; a lock is not worth it on a file nothing paces from.
+    A failed write is reported and swallowed, because the hook is already in
+    or out of Claude's settings, and that is the part that matters. The key is
+    returned either way: it names this account whether or not the entry was
+    saved, and `install --force` uses it to leave this account out of the
+    list of others.
+    """
+    acct = account_paths(os.environ.get("CLAUDE_CONFIG_DIR"))
+    reg = load_registry()
+    reg[acct["config_key"]] = {
+        # The directory claude_settings_path() wrote into, absolute so that a
+        # `status` run from another cwd still finds the same settings.json.
+        "config_dir": os.path.abspath(
+            os.path.dirname(claude_settings_path())),
+        "slug": acct["slug"],
+        "hook": hooked,
+        "ts": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        write_atomic(REGISTRY_PATH, json.dumps(reg, indent=2, sort_keys=True))
+    except OSError as exc:
+        print(f"warning: could not record this account in {REGISTRY_PATH}: "
+              f"{exc}", file=sys.stderr)
+    return acct["config_key"]
+
+
+def account_label(key, entry=None):
+    """An account as a person reads it: the config dir as it was installed
+    when the registry knows it, since the key is normcased; <default> for the
+    default account."""
+    if not key:
+        return "<default>"
+    cdir = (entry or {}).get("config_dir")
+    return cdir if isinstance(cdir, str) and cdir else key
+
+
 def cmd_install(force, subagent_ttl=None):
     """Register the hook in Claude Code's user settings.
 
@@ -1358,6 +1436,7 @@ def cmd_install(force, subagent_ttl=None):
         marker = load_ttl_marker()
         marker[_marker_key(target)] = subagent_ttl
         save_ttl_marker(marker)
+    this_key = record_account(True)
 
     print(f"hook:     {command}")
     print(f"settings: {target}"
@@ -1366,6 +1445,16 @@ def cmd_install(force, subagent_ttl=None):
         print(f"          {ttl_line}")
     print(f"fragment: {SETTINGS_PATH}  (optional, for --settings)")
     print(f"policy:   {POLICY_PATH}")
+    if force:
+        # policy.json is shared (plan D1), so --force just reset the rules of
+        # every account on this machine, not only this shell's. Name them, or
+        # someone repairing one account silently unpaces the others.
+        others = [account_label(k, e) for k, e in sorted(
+            load_registry().items()) if k != this_key]
+        print("          reset to the defaults for every account; "
+              "the policy is shared")
+        for label in others:
+            print(f"          also used by: {label}")
     print("\nnext:")
     print("  niceclaude on <folder> --model opus")
     print("  niceclaude watch")
@@ -1408,6 +1497,10 @@ def cmd_uninstall():
         print(f"no niceclaude hook registered in {target}")
     if ttl_msg:
         print(ttl_msg)
+    # Kept, with hook false, rather than dropped: the entry is the only record
+    # of this config dir, and `status` then shows the account as uninstalled
+    # on purpose instead of nagging about a hook that is meant to be gone.
+    record_account(False)
 
     if os.path.exists(SETTINGS_PATH):
         os.remove(SETTINGS_PATH)
@@ -1446,13 +1539,23 @@ def pid_alive(pid):
     return True
 
 
-def read_pid():
+def pid_at(path):
+    """The live pid recorded in the pidfile at `path`, or None.
+
+    Separate from read_pid so `status` can ask about any account's pidfile,
+    and the legacy root one, with the same liveness rule `watch` and `stop`
+    use for this account's.
+    """
     try:
-        with open(PID_PATH, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             pid = int(fh.read().strip())
     except (OSError, ValueError):
         return None
     return pid if pid_alive(pid) else None
+
+
+def read_pid():
+    return pid_at(PID_PATH)
 
 
 def cmd_stop():
@@ -1461,7 +1564,17 @@ def cmd_stop():
         print("no daemon running")
         return 0
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        r = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True)
+        # taskkill /F gives the daemon no chance to run cmd_watch's cleanup,
+        # so the pidfile is removed here. Left behind, it outlives the daemon,
+        # and once Windows reuses the pid, `status` reports the stopped
+        # account's daemon as running and its next `watch` refuses to start.
+        if r.returncode == 0:
+            try:
+                os.remove(PID_PATH)
+            except OSError:
+                pass
     else:
         import signal
         os.kill(pid, signal.SIGTERM)
@@ -1740,13 +1853,164 @@ def legacy_daemon_suspected():
     ts = root_state.get("ts_epoch")
     if isinstance(ts, (int, float)) and time.time() - ts < MAX_STALE:
         return True
-    root_pid = os.path.join(ROOT_DIR, "daemon.pid")
+    return pid_at(os.path.join(ROOT_DIR, "daemon.pid")) is not None
+
+
+HISTORY_CAVEAT = ("only if that history was recorded by this account alone; "
+                  "a mixed log cannot be split")
+
+
+def legacy_history_moves():
+    """[(src, dst)] for the history this account left at the root, or [].
+
+    Someone who ran a single non-default CLAUDE_CONFIG_DIR before accounts
+    existed has their history in the root, and their account's own directory
+    starts empty, so `burn` and `plot` lose it. Nothing moves it for them:
+    whether the root's log is theirs alone, or two accounts' interleaved,
+    is something only they know, and a mixed log can never be split again
+    (plan D9). So `status` prints the exact moves and leaves the choice.
+
+    Offered only when all four hold: a non-default account; no NICECLAUDE_DIR,
+    which already names one directory for every account (D3); history at the
+    root; and none yet in this account's directory, so the hint stops once it
+    has been taken, or once this account has a log of its own. Only the two
+    history files ever move. state.json is rewritten by the next poll, and
+    policy.json, the TTL marker and the registry are shared by every account.
+
+    NICECLAUDE_DIR is read at call time, like the paths, so tests can pin it.
+    """
+    if not ACCOUNT_KEY or os.environ.get("NICECLAUDE_DIR"):
+        return []
+    if DATA_DIR == ROOT_DIR or os.path.exists(
+            os.path.join(DATA_DIR, "usage.jsonl")):
+        return []
+    return [(os.path.abspath(os.path.join(ROOT_DIR, name)),
+             os.path.abspath(os.path.join(DATA_DIR, name)))
+            for name in ("usage.jsonl", "hook.log")
+            if os.path.exists(os.path.join(ROOT_DIR, name))]
+
+
+def relative_config_dir():
+    """CLAUDE_CONFIG_DIR, when it is set to a relative path; else None.
+
+    Claude resolves a relative value against the directory each session
+    starts in, and does not expand a leading `~` (plan D4), so such a value
+    names a different directory -- and a different account here -- from every
+    cwd. It is almost always a quoting slip, so `status` says so.
+    """
+    value = os.environ.get("CLAUDE_CONFIG_DIR")
+    if value and not os.path.isabs(value):
+        return value
+    return None
+
+
+def account_dir(slug):
+    """Where the account with `slug` keeps its files, built from ROOT_DIR.
+
+    The default account, and every account under a set NICECLAUDE_DIR (D3),
+    use the root itself. Read at call time so tests can pin ROOT_DIR.
+    """
+    if not slug or os.environ.get("NICECLAUDE_DIR"):
+        return ROOT_DIR
+    return os.path.join(ROOT_DIR, "accounts", slug)
+
+
+def known_accounts():
+    """One line per account `status` knows of, the current one marked `*`.
+
+    The union of the registry and the `accounts/*` directories. A registered
+    account's hook is checked live in its own settings.json, because a hook
+    added or removed by hand since is what actually paces; a stored
+    `hook: false` explains a missing one. A directory with no entry was made
+    by a `watch` or a hook in an account nobody ran `install` from since the
+    registry existed, so all that can be said of it is its slug.
+    """
+    reg = load_registry()
+    here = account_slug(ACCOUNT_KEY)
+
+    def daemon(slug):
+        pid = pid_at(os.path.join(account_dir(slug), "daemon.pid"))
+        if pid is None:
+            return "no daemon"
+        # Under a set NICECLAUDE_DIR every account shares the root, and so one
+        # pidfile (D3): the daemon is whichever account started first, and
+        # nothing on disk reliably says which -- a hook's refresh in any of
+        # them also publishes the root snapshot. Say so rather than claim it
+        # for every account.
+        if os.environ.get("NICECLAUDE_DIR"):
+            return (f"daemon running (pid {pid}; one pidfile shared by every "
+                    f"account in NICECLAUDE_DIR, so it may be another's)")
+        return f"daemon running (pid {pid})"
+
+    lines, seen = [], set()
+    for key, entry in sorted(reg.items(), key=lambda kv: (kv[0] != "", kv[0])):
+        slug = entry.get("slug") if isinstance(entry.get("slug"), str) \
+            else account_slug(key)
+        seen.add(slug)
+        cdir = entry.get("config_dir")
+        if isinstance(cdir, str) and registered_in(
+                os.path.join(cdir, "settings.json")):
+            hooked = "hook registered"
+        elif entry.get("hook") is False:
+            hooked = "(uninstalled on purpose)"
+        else:
+            hooked = "hook NOT registered"
+        mark = "*" if key == ACCOUNT_KEY else " "
+        lines.append(f"{mark} {account_label(key, entry)}: {hooked}; "
+                     f"{daemon(slug)}")
     try:
-        with open(root_pid, encoding="utf-8") as fh:
-            pid = int(fh.read().strip())
-    except (OSError, ValueError):
-        return False
-    return pid_alive(pid)
+        names = sorted(os.listdir(os.path.join(ROOT_DIR, "accounts")))
+    except OSError:
+        names = []
+    for slug in names:
+        if slug in seen or not os.path.isdir(
+                os.path.join(ROOT_DIR, "accounts", slug)):
+            continue
+        mark = "*" if slug == here else " "
+        lines.append(f"{mark} no install recorded for {slug}; {daemon(slug)}")
+    return lines
+
+
+def _header(label, text):
+    """One wrapped header line, the label in status's 16-column gutter."""
+    import textwrap
+    print(f"{label:<16}" + "\n                ".join(textwrap.wrap(text, 63)))
+
+
+def print_account_header():
+    """The account-level part of `status`'s header.
+
+    Printed before the `matched is None` return, because none of it is about
+    the folder: a pre-upgrade daemon misleads the default account's hooks,
+    and a stranded history or a relative config dir is wrong, whatever this
+    folder's policy is.
+    """
+    print(f"account:        {hook.describe_key(ACCOUNT_KEY)}")
+    print(f"                data in {DATA_DIR}")
+    rel = relative_config_dir()
+    if rel is not None:
+        _header("WARNING:", f"CLAUDE_CONFIG_DIR is relative ({rel}). Claude "
+                f"resolves it against the directory each session starts in, "
+                f"and does not expand ~, so from here it names "
+                f"{os.path.abspath(rel)} and the account changes with the "
+                f"directory. Make it an absolute path.")
+    if legacy_daemon_suspected():
+        _header("WARNING:", LEGACY_DAEMON_WARNING)
+    moves = legacy_history_moves()
+    if moves:
+        _header("history:", "the data root holds history from before "
+                "accounts were kept apart. Move it to this account "
+                + HISTORY_CAVEAT + ":")
+        if not os.path.isdir(DATA_DIR):
+            print(f'                  mkdir -p "{DATA_DIR}"')
+        for src, dst in moves:
+            print(f'                  mv "{src}" "{dst}"')
+            if os.path.exists(dst):
+                print("                  (this account already has one; "
+                      "mv would replace it, so merge by hand)")
+    lines = known_accounts()
+    for i, line in enumerate(lines):
+        print(("accounts:       " if i == 0 else " " * 16) + line)
 
 
 def human_delta(seconds):
@@ -1808,12 +2072,8 @@ def cmd_status(path):
     print(f"folder:         {key}")
     print(f"hook:           {describe_installation()}")
     print(f"global.enabled: {genabled}")
-    # Before the unpaced return: a pre-upgrade daemon misleads the default
-    # account's hooks whatever this folder's policy is.
-    if legacy_daemon_suspected():
-        import textwrap
-        print("WARNING:        " + "\n                ".join(
-            textwrap.wrap(LEGACY_DAEMON_WARNING, 63)))
+    # Before the unpaced return: nothing in it is about this folder.
+    print_account_header()
     if matched is None:
         print("matched rule:   <none>  -> NOT paced")
         return 0
@@ -2340,7 +2600,14 @@ that `claude --settings <fragment>` applies to one session, for anyone who
 would rather opt sessions in than carry the hook everywhere.
 
 policy.json is created with defaults if it does not exist, and otherwise left
-alone unless you pass --force.
+alone unless you pass --force. The policy is shared by every account on this
+machine -- every CLAUDE_CONFIG_DIR -- so --force resets the rules for all of
+them, and install names the other accounts it has recorded.
+
+Install is per account: it registers the hook in the settings.json of the
+config dir CLAUDE_CONFIG_DIR names, and nowhere else, so run it once from each
+account's environment. Each run records that account in accounts.json in the
+data directory, which is how `status` lists every account from any of them.
 
 --subagent-cache-1h or --subagent-cache-5m also sets subagentPromptCacheTtl in
 the same file. Subagents (and workflows, teammates, compaction) get a 5-minute
@@ -2372,6 +2639,10 @@ is deleted too. policy.json, usage.jsonl and state.json are kept, so a later
 subagentPromptCacheTtl is removed only if `install --subagent-cache-*` set it
 and it still holds the value written then; a value you set, or changed since,
 is left in place and the reason printed.
+
+Only the account CLAUDE_CONFIG_DIR names is un-registered. It stays in
+accounts.json with its hook marked off, so `status` shows it as uninstalled on
+purpose rather than as a hook that has gone missing.
 
 This stops pacing everywhere at once. To stop it for one folder use
 `niceclaude off`; to suspend every rule while keeping the hook registered use
@@ -2631,6 +2902,15 @@ a time, and BRAKED above the pace line, where it stops. Either way it gives
 the reason, the release time, and how often the hold is re-evaluated; with a
 max_delay set it says what the cap will actually do.
 
+The header also names this shell's account -- the one CLAUDE_CONFIG_DIR
+names, or <default> -- and lists every account install has recorded or that has
+a directory under accounts/, each with whether its hook is registered and
+whether its daemon is running. It warns about a relative CLAUDE_CONFIG_DIR,
+and about a pre-upgrade daemon still writing into the shared root. Where an
+account's history was left in the root by an older version, it prints the
+two `mv` commands that move it, to be run only if that history is this
+account's alone.
+
 Warns when the snapshot is older than 180s, which usually means `watch` is not
 running. If NICECLAUDE_OFF is set in this shell it says so, instead of
 claiming the folder is paced.
@@ -2828,8 +3108,11 @@ def build_parser():
 
     i = _command(sub, "install")
     i.add_argument("--force", action="store_true",
-                   help="reset policy.json to the defaults as well; without "
-                        "this an existing policy is kept")
+                   help="reset policy.json to the defaults as well. The "
+                        "policy is shared, so this resets the rules of EVERY "
+                        "account, not only this one; install names the other "
+                        "accounts it has recorded. Without this an existing "
+                        "policy is kept")
     _subagent_ttl_flags(i, "in Claude Code's user settings.json")
     _command(sub, "uninstall")
     _command(sub, "version")

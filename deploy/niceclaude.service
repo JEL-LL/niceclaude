@@ -5,6 +5,9 @@
 #             systemctl --user enable --now niceclaude
 #   logs:     journalctl --user -u niceclaude -f
 #
+# This unit polls the DEFAULT account (~/.claude). For a second account, use
+# niceclaude@.service beside it: one daemon per account.
+#
 # A user unit only runs while the user has a session. For the daemon to keep
 # polling on a headless box, or across logout, enable lingering ONCE:
 #
@@ -29,12 +32,11 @@ Type=simple
 ExecStart=%h/.local/bin/niceclaude watch --interval 60
 # Graceful stop via the pidfile, so the unit never has to match on process name.
 ExecStop=%h/.local/bin/niceclaude stop
-# The daemon does not unlink its pidfile when killed by SIGTERM (Python's
-# default handler skips the cleanup), and a leftover PID can later be reused by
-# an unrelated process, which would make the next `watch` refuse to start.
-# If you override the data directory with Environment=NICECLAUDE_DIR=..., point
-# this line at the same place.
-ExecStopPost=-/bin/rm -f %h/.local/share/niceclaude/daemon.pid
+# There is deliberately no ExecStopPost removing the pidfile. `watch` turns
+# SIGTERM into an ordinary exit, so its own cleanup removes the pidfile, and a
+# hardcoded path here would be wrong for any account but the default: a
+# non-default CLAUDE_CONFIG_DIR keeps its pidfile under accounts/<slug>/.
+# niceclaude@.service runs one of those.
 
 # `watch` shells out to `claude -p /usage`, so BOTH binaries must be on this
 # PATH. Add wherever your `claude` lives if it is not one of these.

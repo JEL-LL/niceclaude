@@ -49,17 +49,40 @@ poll happens once a minute rather than once per tool call.
 ## State on disk
 
 ```
-<data>/usage.jsonl     append-only history, raw stdout + parsed fields
-<data>/state.json      latest snapshot (no decisions in it, by design)
-<data>/policy.json     folder rules; re-read on every hook invocation
-<data>/hook.log        brake/release events — the only record of overnight behaviour
-<data>/daemon.pid      pidfile
-<config>/settings.json optional --settings fragment; `install` registers the
-                       hook in ~/.claude/settings.json (CLAUDE_CONFIG_DIR)
+<root>/policy.json            folder rules, shared by every account; re-read
+                              on every hook invocation
+<root>/accounts.json          which config dirs `install` has been run against
+<root>/claude_settings_marker.json
+                              the subagentPromptCacheTtl `install` wrote, keyed
+                              by Claude settings path (present only while set)
+<data>/usage.jsonl            append-only history, raw stdout + parsed fields
+<data>/state.json             latest snapshot (no decisions in it, by design)
+<data>/hook.log               brake/release events — the only record of
+                              overnight behaviour
+<data>/daemon.pid             pidfile
+<config>/settings.json        optional --settings fragment; `install` registers
+                              the hook in ~/.claude/settings.json
+                              (CLAUDE_CONFIG_DIR)
 ```
 
-`<data>` is `~/.local/share/niceclaude` on POSIX, `%LOCALAPPDATA%\niceclaude` on
-Windows. Override with `NICECLAUDE_DIR`.
+`<root>` is `~/.local/share/niceclaude` on POSIX, `%LOCALAPPDATA%\niceclaude` on
+Windows. `<data>` is the current account's directory: `<root>` itself for the
+default account (`CLAUDE_CONFIG_DIR` unset, empty, or resolving to
+`~/.claude`), and `<root>/accounts/<slug>` for any other, so two accounts on
+one machine never share a snapshot, a log or a daemon. The slug is the config
+dir's basename plus a CRC32 of its normalized path. `niceclaude paths` prints
+every path for the current account.
+
+`NICECLAUDE_DIR` overrides `<root>`, and is then `<data>` for every account,
+unslugged; `<config>` follows it to `<NICECLAUDE_DIR>/config` (decision 16).
+Accounts sharing one `NICECLAUDE_DIR` are told apart by the `config_key`
+stamp on every snapshot and log record, which the hook and `load_log` check.
+
+The account is read from the environment. A hook that loses
+`CLAUDE_CONFIG_DIR` is keyed as the default account; whether that can happen
+is unverified until Procedure B (`open-questions.md` §10) is run, and the
+payload fallback that would cover it is deferred until then. Design: decision
+19, and `per-account-state-plan.md`.
 
 ## Machine state left behind by development
 

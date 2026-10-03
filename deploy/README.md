@@ -17,12 +17,20 @@ These files assume the executables are in `~/.local/bin`
 
 | File | Use it when |
 | --- | --- |
-| `niceclaude.service` | Linux box with systemd and a user account — laptop, workstation, always-on server. Runs as *you*, not root. |
+| `niceclaude.service` | Linux box with systemd and a user account — laptop, workstation, always-on server. Runs as *you*, not root. Polls the default account. |
+| `niceclaude@.service` | The same, for each further account: `niceclaude@work` polls the account in `~/.claude-work`. |
 | `docker-entrypoint.sh` | The agent runs in a container; the poller has to live and die with that container. |
-| `niceclaude-task.ps1` | Windows, started at logon. (Windows is verified end to end — see `harness/windows-results.md`.) |
+| `niceclaude-task.ps1` | Windows, started at logon. (Windows is verified end to end — see `harness/windows-results.md`.) `-ConfigDir <dir>` registers a further account's task beside the default one. |
 
-Only one daemon per data directory: `watch` writes `<data>/daemon.pid` and
-refuses to start if a live PID is already recorded there. Stop it with
+One daemon per account. Each account — each `CLAUDE_CONFIG_DIR` — has its own
+pidfile, which `niceclaude paths pid_path` prints, and `watch` refuses to
+start if a live PID is already recorded there. The exception is several
+accounts sharing one `NICECLAUDE_DIR`: that gives them one pidfile, so only
+one daemon can run there. Give each account its own `NICECLAUDE_DIR`, or
+none. A daemon polls the account its
+own environment names, so a second account needs a second daemon started with
+that `CLAUDE_CONFIG_DIR` exported, and `niceclaude stop` must be run with it
+exported too. Stop it with
 `niceclaude stop`, never by matching on the process name — any shell whose
 command line merely mentions `niceclaude watch` matches that pattern too.
 
@@ -30,12 +38,19 @@ command line merely mentions `niceclaude watch` matches that pattern too.
 
 | | POSIX | Windows |
 | --- | --- | --- |
-| data (`usage.jsonl`, `state.json`, `policy.json`, `daemon.pid`) | `~/.local/share/niceclaude` | `%LOCALAPPDATA%\niceclaude` |
+| data root (`policy.json`, `accounts.json`; the default account's `usage.jsonl`, `state.json`, `hook.log`, `daemon.pid`) | `~/.local/share/niceclaude` | `%LOCALAPPDATA%\niceclaude` |
+| any other account's `usage.jsonl`, `state.json`, `hook.log`, `daemon.pid` | `<data root>/accounts/<slug>` | `<data root>\accounts\<slug>` |
 | settings fragment (`settings.json`) | `~/.config/niceclaude` | `%APPDATA%\niceclaude` |
 
-`NICECLAUDE_DIR` overrides the **data** directory only; the settings fragment
-does not move with it. Both the daemon and the hook must see the same data
-directory, so if you set `NICECLAUDE_DIR` set it for both.
+`niceclaude paths` prints every one of these for the current account.
+
+`NICECLAUDE_DIR` relocates the data directory **and** the settings fragment,
+which moves to `<NICECLAUDE_DIR>/config` unless `NICECLAUDE_CONFIG_DIR` is set
+too (`harness/design-decisions.md` §16), so one mount carries both. It is used
+verbatim, for every account: accounts sharing one `NICECLAUDE_DIR` share its
+files, and are kept apart only by the account stamp in each snapshot and log
+record. The daemon and the hook must see the same data directory, so if you
+set `NICECLAUDE_DIR`, set it for both.
 
 ## Containers: bind-mount the data directory
 
@@ -64,10 +79,12 @@ The entrypoint deliberately does **not** `exec` the container command: an
 TERM/INT/HUP to both children, and exits with the app's own status.
 
 If the daemon reports `daemon already running` right after a container start,
-`<data>/daemon.pid` is stale — the recorded PID belongs to a dead container but
+the account's pidfile (`niceclaude paths pid_path`) is stale — the recorded PID belongs to a dead container but
 collides with a live PID in the new namespace. `docker-entrypoint.sh` clears it
-when it is running as PID 1; otherwise delete the file by hand. Nothing removes
-it on SIGTERM.
+when it is running as PID 1, at the path `niceclaude paths pid_path` reports for
+the container's account; otherwise delete the file by hand. `watch` removes
+it on a clean SIGTERM; only a daemon killed outright (SIGKILL, or `docker
+stop`'s timeout) leaves it behind.
 
 ## Verifying the daemon is alive
 

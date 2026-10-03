@@ -16,7 +16,6 @@ set -eu
 
 NICECLAUDE_BIN=${NICECLAUDE_BIN:-niceclaude}
 NICECLAUDE_INTERVAL=${NICECLAUDE_INTERVAL:-60}
-NICECLAUDE_DATA=${NICECLAUDE_DIR:-$HOME/.local/share/niceclaude}
 
 daemon_pid=""
 app_pid=""
@@ -60,8 +59,19 @@ trap on_term TERM INT HUP
 # pidfile by a previous container is meaningless -- and if it happens to match a
 # live PID here, `watch` refuses to start. Only clear it when we really are the
 # container's init ($$ = 1); under `--pid=host` or a shell wrapper, leave it be.
-if [ "$$" = "1" ] && [ -f "$NICECLAUDE_DATA/daemon.pid" ]; then
-    rm -f "$NICECLAUDE_DATA/daemon.pid"
+#
+# The path is asked of the CLI, not built here: under a non-default
+# CLAUDE_CONFIG_DIR the pidfile lives in <data>/accounts/<slug>/, and the slug
+# is a hash only niceclaude computes. Guessing <data>/daemon.pid would miss it
+# silently. `paths pid_path` prints the one bare value, so there is no JSON to
+# parse -- this image may have neither jq nor python3 on PATH.
+if [ "$$" = "1" ]; then
+    pidfile=$("$NICECLAUDE_BIN" paths pid_path) || pidfile=""
+    if [ -z "$pidfile" ]; then
+        log "could not ask niceclaude for its pidfile; not clearing it"
+    elif [ -f "$pidfile" ]; then
+        rm -f "$pidfile"
+    fi
 fi
 
 "$NICECLAUDE_BIN" watch --interval "$NICECLAUDE_INTERVAL" &

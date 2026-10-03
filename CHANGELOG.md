@@ -13,7 +13,70 @@ refactors and internal cleanups do not need a line at all.
 
 ## Unreleased
 
+### Upgrading: stop every daemon first
+
+**Stop every daemon before upgrading.** A default-account daemon, and any
+daemon still running under a hand-set `NICECLAUDE_DIR`, keeps its pidfile
+where it was, so the new `niceclaude stop` finds it from the matching shell. A
+pre-upgrade daemon started under a work `CLAUDE_CONFIG_DIR` wrote its pidfile
+to the **root**. It is stopped by `niceclaude stop` run from a shell with
+`CLAUDE_CONFIG_DIR` *unset*.
+
+Left running, that daemon keeps publishing unstamped work-account snapshots
+into the root. The default account's hooks trust them under D7, which is the
+original bug, silently. Meanwhile a new `watch` in the work environment starts
+a second daemon for the same account.
+
+(D7 is the rule that a snapshot with no account stamp belongs to the default
+account; `harness/design-decisions.md` §19.) Restart each daemon after the
+upgrade, from its own account's environment. `status` warns when it sees the
+signs of a daemon that was missed.
+
 ### Changed
+
+- **Each Claude account keeps its own usage state** (issue #1). Sessions
+  started with `CLAUDE_CONFIG_DIR` set used to share one `state.json` with
+  every other account, so one account was paced on another's numbers — held
+  when it should run, and released when it should hold — and a `watch` started
+  in one account kept the others on its snapshot permanently. Now each
+  non-default account has its own snapshot, history, hook log and pidfile
+  under `accounts/<slug>/` in the data directory, every snapshot and log
+  record is stamped with the account that took it, and a snapshot stamped by
+  another account is ignored rather than paced on. The default account
+  (`CLAUDE_CONFIG_DIR` unset, empty, or resolving to `~/.claude`) keeps every
+  file exactly where it was.
+
+  `policy.json` stays shared, so `on` and `off` work from any shell and pace a
+  folder the same way under every account. `install` is per account, as it
+  always was: run it once from each account's environment. One daemon runs per
+  account. A set `NICECLAUDE_DIR` still means exactly that directory, for every
+  account, so the old per-account workaround keeps working unchanged; the
+  README has the steps to rejoin the shared policy.
+
+  An account that ran under a non-default `CLAUDE_CONFIG_DIR` before this
+  version has its history left in the shared data directory, and its new
+  directory starts empty. Nothing is moved automatically: `status` prints the
+  two `mv` commands, to be run only if that history was recorded by that
+  account alone, since a log two accounts wrote cannot be split.
+
+  The account is read from the environment, so a hook that loses
+  `CLAUDE_CONFIG_DIR` is keyed as the default account. Whether that can
+  happen is unverified until Procedure B (`harness/open-questions.md` §10)
+  is run.
+
+- **`install --force` names the accounts it affects.** The policy it resets is
+  shared, so it resets every account's rules; it now says so, and lists the
+  other accounts it has recorded.
+
+- **`deploy/`: no `ExecStopPost` in `niceclaude.service`.** It removed the
+  default account's pidfile by a hardcoded path, which was wrong for any other
+  account and has been unnecessary since `watch` began cleaning up after
+  SIGTERM. The container entrypoint now asks `niceclaude paths pid_path` for
+  the pidfile it clears, instead of assuming the default account's.
+- **`stop` on Windows removes the pidfile.** `taskkill /F` gives the daemon no
+  chance to run its cleanup, so the pidfile used to outlive it; once Windows
+  reused the pid, `status` reported the stopped daemon as running and the next
+  `watch` refused to start. `stop` now removes it after a successful kill.
 
 - **`plot` defaults to the line the folder is actually paced against.** With
   no `--m0`, `--m1` or `--band`, the figure is now drawn against the geometry
@@ -31,6 +94,26 @@ refactors and internal cleanups do not need a line at all.
   the figure is identical to before.
 
 ### Added
+
+- **`status` shows accounts.** Its header names this shell's account and lists
+  every account `install` has recorded (in `accounts.json` at the data root)
+  or that has a directory, each with whether its hook is registered — checked
+  live in that account's own `settings.json` — and whether its daemon is
+  running. `uninstall` keeps the account's entry, shown as `(uninstalled on
+  purpose)`. It also warns about a relative `CLAUDE_CONFIG_DIR`, which Claude
+  resolves against wherever a session starts and never `~`-expands, and
+  about a pre-upgrade daemon still writing into the shared root.
+- **`niceclaude paths [KEY]`** prints where this account's files live, as JSON,
+  or one value bare for a script: `niceclaude paths pid_path`.
+- **`check` notes a change of login.** Each sample records which login its
+  config dir held (the account and organization UUIDs only; never an address
+  or a name). `check` adds a `note:` when that changes inside one log, or when
+  two account directories hold the same login. Notes leave the exit code
+  alone.
+- **`deploy/niceclaude@.service`**, a templated unit: `niceclaude@work` polls
+  the account in `~/.claude-work`. **`niceclaude-task.ps1 -ConfigDir <dir>`**
+  registers a further account's Windows task as `niceclaude-watch-<slug>`,
+  beside the default one rather than replacing it.
 
 - **`--subagent-cache-1h` / `--subagent-cache-5m` on `install` and `on`.**
   Subagents (and workflows, teammates, compaction) get a 5-minute prompt
