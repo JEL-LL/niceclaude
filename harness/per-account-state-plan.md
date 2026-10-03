@@ -1084,6 +1084,29 @@ Each assumption is marked in the code where it is relied on.
 
 ### Phase 2 — the stamp, the guard, and the log filter
 
+**Status: built, not yet committed; 568 passed (532 before).**
+
+- **Built.** The `config_key` stamp in `publish_state` and `sample_once`;
+  `hook.load_state` at both load sites in `run` and in `cmd_status`, with
+  `run` logging `foreign snapshot (<foreign>)` once per invocation; the D7
+  legacy rule; `cmd_status`'s foreign, unreadable and absent cases; warnings
+  (a) and (b) as `cli.legacy_daemon_suspected`, printed once if either sign
+  holds; the D11 filter in `load_log`; the conftest fixture and marker; the
+  stamp in `smoke_installed.py`; `tests/test_account_stamp.py` and
+  `tests/test_log_filter.py`.
+- **D10 deferred.** Phase 0 Procedure B has not run (filed as §10 of
+  `harness/open-questions.md`, for a machine with two logins), so nothing yet
+  shows a hook can lose `CLAUDE_CONFIG_DIR`. The payload fallback,
+  `CONFIG_DIR_OVERRIDE` and its tests are not built, the conftest fixture
+  does not pin an override that does not exist, and the `ASSUMPTION (Phase 0,
+  unverified)` comment at `_shared.ACCOUNT_KEY` stands as written.
+- **D6's option not taken.** `decide` keeps the generic `"no usable buckets
+  in snapshot"` reason; the `foreign snapshot` line in `hook.log` already
+  names the stamp, and `decide` stays unaware of accounts.
+- **A default stamp is shown as `<default>`.** The default account's key is
+  `""`, so `foreign` can be `""`; `hook.describe_key` prints it as
+  `<default>` in both the log line and `status`, rather than as `()`.
+
 - **Scope:**
   - `publish_state` and `sample_once` write `config_key`.
   - Add `hook.load_state(path, key)` (D6), used at both load sites in `run`

@@ -30,6 +30,9 @@ import pytest
 from niceclaude import _shared, cli, hook
 from niceclaude._shared import account_paths, account_slug, norm_config_dir
 
+# These assert on the real import-time key, which conftest would pin to "".
+pytestmark = pytest.mark.real_account_key
+
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "src")
 

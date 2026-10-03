@@ -26,6 +26,7 @@ import sys
 import time
 
 from ._shared import (
+    ACCOUNT_KEY,
     DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE,
     DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY, HOOK_LOG_PATH, bucket_pace,
     coerce_num, normalize_enforce, MAX_STALE, NEAR_STALE, off_or_num,
@@ -40,6 +41,55 @@ def load_json(path, fallback):
             return json.load(fh)
     except (OSError, ValueError):
         return fallback
+
+
+# What load_state reports for a snapshot that parsed but carries no stamp at
+# all, under a non-default key. Angle-bracketed so it can never be mistaken for
+# a real key, which is always an absolute path or "".
+UNSTAMPED = "<unstamped>"
+
+
+def load_state(path, key):
+    """The snapshot at `path`, accepted only if account `key` wrote it.
+
+    Returns (state, foreign). An accepted snapshot is (state, None). A rejected
+    one is ({}, foreign), where `foreign` is the stamp found, or UNSTAMPED. The
+    {} is load-bearing: another account's usage is not a lower bound on ours,
+    so handing its buckets to decide(degraded=True) would brake "with full
+    confidence" on numbers that say nothing about this account. With {} the
+    age is None, so `run` refreshes, and a failed refresh leaves decide with no
+    usable bucket -- blind, which is the honest answer.
+
+    A missing or unparseable file, or one that parses to something other than
+    a dict, is ({}, None): absent, not foreign. Otherwise every fresh account's
+    first call would log a foreign snapshot, and `status` would blame another
+    account for a file nobody has written yet.
+
+    A snapshot with no `config_key` predates the stamp, and is trusted under
+    the default key only. That keeps a single-account upgrade working, and
+    costs a non-default account one refresh to replace it.
+
+    Both arguments are explicit and no module global is read, so the hook and
+    `status` each pass the paths their own tests pin. Writes no log: `run`
+    does that, once per invocation, and `status` must never touch hook.log.
+    """
+    state = load_json(path, None)
+    if not isinstance(state, dict):
+        return {}, None
+    if "config_key" not in state:
+        return (state, None) if key == "" else ({}, UNSTAMPED)
+    stamp = state["config_key"]
+    if stamp == key:
+        return state, None
+    # A string compare and nothing else: no import, no syscall. A stamp that
+    # is not a string came from no niceclaude, so it is shown, not trusted.
+    return {}, stamp if isinstance(stamp, str) else repr(stamp)
+
+
+def describe_key(key):
+    """A stamp as a person reads it: the default account's key is "", which
+    would print as an empty pair of parentheses."""
+    return key if key else "<default>"
 
 
 def log(msg):
@@ -357,6 +407,19 @@ def run(cwd, event=None):
                          # stopping at the brake line on its way past. `decide`
                          # is stateless, so this latch is the hysteresis.
     was_soft = False
+    told_foreign = False  # `foreign snapshot` is logged once per invocation,
+                          # not once per chunk of a hold that cannot refresh
+
+    def load():
+        # STATE_PATH and ACCOUNT_KEY are looked up here, at call time, so the
+        # tests' monkeypatches of this module reach both load sites.
+        nonlocal told_foreign
+        state, foreign = load_state(STATE_PATH, ACCOUNT_KEY)
+        if foreign is not None and not told_foreign:
+            told_foreign = True
+            log(f"foreign snapshot ({describe_key(foreign)}) cwd={cwd} "
+                f"-- ignored")
+        return state
 
     while True:
         now = time.time()
@@ -368,7 +431,9 @@ def run(cwd, event=None):
         if paced_entry(policy, cwd) is None:
             return brake_start, "unpaced"
 
-        state = load_json(STATE_PATH, {})
+        # Another account's snapshot loads as {}, so its age is None and the
+        # refresh below runs: one refresh replaces it with our own.
+        state = load()
         age = snapshot_age(state, now)
         degraded = age is None or age > MAX_STALE
         d = decide(policy, state, cwd, now, degraded=degraded, event=event,
@@ -393,7 +458,7 @@ def run(cwd, event=None):
                 fails = min(fails + 1, len(REFRESH_BACKOFF) - 1)
                 next_try = now + REFRESH_BACKOFF[fails]
             now = time.time()
-            state = load_json(STATE_PATH, {})
+            state = load()
             age = snapshot_age(state, now)
             degraded = age is None or age > MAX_STALE
             d = decide(policy, state, cwd, now, degraded=degraded, event=event,

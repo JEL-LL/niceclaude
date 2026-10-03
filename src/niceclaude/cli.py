@@ -293,6 +293,9 @@ def sample_once():
     return {
         "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ts_epoch": int(now.timestamp()),
+        # Which account sampled, so load_log can drop another account's records
+        # from a log two accounts share under one NICECLAUDE_DIR (plan D11).
+        "config_key": ACCOUNT_KEY,
         "elapsed_ms": elapsed_ms,
         "exit_code": rc,
         "raw": raw,                       # verbatim: the parser stays re-runnable
@@ -329,10 +332,16 @@ def publish_state(rec):
 
     Deliberately carries no decision: those depend on per-folder policy, and
     computing them here would mean one state file per folder.
+
+    Stamped with this process's account key. The path alone cannot keep
+    accounts apart -- a shared NICECLAUDE_DIR is one directory for all of them
+    -- so the hook and `status` check the stamp (hook.load_state) and ignore a
+    snapshot another account wrote.
     """
     write_atomic(STATE_PATH, json.dumps({
         "ts_epoch": rec["ts_epoch"],
         "ts": rec["ts"],
+        "config_key": ACCOUNT_KEY,
         "ok": rec["exit_code"] == 0 and bool(rec["buckets"]),
         "buckets": {
             k: {"pct": b["pct"], "resets_epoch": b["resets_epoch"],
@@ -416,18 +425,39 @@ def geometry_for(path):
 # --- assertions --------------------------------------------------------------
 
 def load_log():
+    """This account's records from usage.jsonl.
+
+    A record stamped by another account is skipped and counted, because a
+    NICECLAUDE_DIR shared by two accounts is one log for both, and `check`
+    would flag false decreases while `burn` and `plot` differenced across
+    accounts. An unstamped record is kept under EVERY key, which is looser
+    than the snapshot rule on purpose: a snapshot is transient, and wrongly
+    trusting one mis-paces, but history is permanent, and wrongly hiding it
+    cannot be undone. Unstamped records predate the stamp, so this keeps a
+    migrated account's history, and a pre-upgrade mix stays mixed, as it was.
+    """
     if not os.path.exists(LOG_PATH):
         return []
     out = []
+    skipped = 0
     with open(LOG_PATH, encoding="utf-8") as fh:
         for n, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
                 print(f"  corrupt JSON at log line {n}", file=sys.stderr)
+                continue
+            if (isinstance(rec, dict) and "config_key" in rec
+                    and rec["config_key"] != ACCOUNT_KEY):
+                skipped += 1
+                continue
+            out.append(rec)
+    if skipped:
+        print(f"  skipped {skipped} records from other accounts",
+              file=sys.stderr)
     return out
 
 
@@ -1515,6 +1545,49 @@ def describe_installation():
     return ("NOT REGISTERED -- nothing is pacing anything. Run: niceclaude install")
 
 
+LEGACY_DAEMON_WARNING = (
+    "a daemon holding the legacy pidfile has not published a stamped "
+    "snapshot; if it predates this version, stop it from a shell with "
+    "CLAUDE_CONFIG_DIR unset and restart `watch`")
+
+
+def legacy_daemon_suspected():
+    """True when a pre-upgrade daemon may still be writing into the root.
+
+    A daemon started under a non-default CLAUDE_CONFIG_DIR before accounts
+    existed wrote its pidfile to the root, and still publishes unstamped
+    snapshots there -- which the default account's hooks trust, because an
+    unstamped snapshot is the default account's by the legacy rule. That is
+    the original bug, silent, so only `status` can surface it.
+
+    Asked only from a non-default data dir, since the root is this account's
+    own otherwise. Two signs, either enough: (a) a root snapshot with no stamp
+    that is still fresh, so something is writing it; (b) a live root pid while
+    the root snapshot has no `config_key` at all. A stamp of "" does not count:
+    that is the default account's own new daemon, which owns the root pidfile
+    in ordinary two-account use, and telling a work account to kill it would
+    be wrong. The wording stays conditional because (b) also fires for that
+    new daemon before its first publish, and nothing here can tell them apart.
+
+    The paths are built here, from ROOT_DIR, so tests can pin them.
+    """
+    if DATA_DIR == ROOT_DIR:
+        return False
+    root_state = hook.load_json(os.path.join(ROOT_DIR, "state.json"), None)
+    if not isinstance(root_state, dict) or "config_key" in root_state:
+        return False
+    ts = root_state.get("ts_epoch")
+    if isinstance(ts, (int, float)) and time.time() - ts < MAX_STALE:
+        return True
+    root_pid = os.path.join(ROOT_DIR, "daemon.pid")
+    try:
+        with open(root_pid, encoding="utf-8") as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+    return pid_alive(pid)
+
+
 def human_delta(seconds):
     """Compact duration: 5d00h, 4h12m, 12m03s, 42s.
 
@@ -1574,6 +1647,12 @@ def cmd_status(path):
     print(f"folder:         {key}")
     print(f"hook:           {describe_installation()}")
     print(f"global.enabled: {genabled}")
+    # Before the unpaced return: a pre-upgrade daemon misleads the default
+    # account's hooks whatever this folder's policy is.
+    if legacy_daemon_suspected():
+        import textwrap
+        print("WARNING:        " + "\n                ".join(
+            textwrap.wrap(LEGACY_DAEMON_WARNING, 63)))
     if matched is None:
         print("matched rule:   <none>  -> NOT paced")
         return 0
@@ -1616,11 +1695,19 @@ def cmd_status(path):
     print(f"  band_delay    {gear}")
     print(f"  enforces      {', '.join(sorted(enforce))}")
 
-    if not os.path.exists(STATE_PATH):
-        print("\nno snapshot yet -- is `niceclaude watch` running?")
+    # The hook's own check, so `status` cannot judge buckets the hook ignores.
+    # Every {} stops here: the table below indexes st["ts_epoch"].
+    st, foreign = hook.load_state(STATE_PATH, ACCOUNT_KEY)
+    if not st:
+        if foreign is not None:
+            print(f"\nsnapshot: written by another account "
+                  f"({hook.describe_key(foreign)}) -- ignored")
+        elif os.path.exists(STATE_PATH):
+            print("\nsnapshot: unreadable -- delete it or restart "
+                  "niceclaude watch")
+        else:
+            print("\nno snapshot yet -- is `niceclaude watch` running?")
         return 0
-    with open(STATE_PATH, encoding="utf-8") as fh:
-        st = json.load(fh)
     now = time.time()
     age = int(now) - st["ts_epoch"]
     print(f"\nsnapshot age:   {age}s")

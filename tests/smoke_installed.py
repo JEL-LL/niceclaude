@@ -150,9 +150,23 @@ def main():
     r = run([nc, "on", work, "--model", "opus"], env)
     check("niceclaude on succeeds", r.returncode == 0, r.stderr.strip())
 
+    # Stamped with this environment's own account key, asked of the installed
+    # CLI. CLAUDE_CONFIG_DIR above is not the default, so an unstamped snapshot
+    # would be ignored as another account's, and the real hook would run a real
+    # `claude -p /usage` refresh instead of judging the numbers below.
+    r = run([nc, "paths"], env)
+    try:
+        config_key = json.loads(r.stdout)["config_key"]
+    except (ValueError, KeyError):
+        config_key = None
+    ok = r.returncode == 0 and bool(config_key)
+    check("niceclaude paths reports this account's key", ok,
+          "" if ok else (r.stderr or r.stdout).strip())
+
     now = int(time.time())
     state = {
         "ts_epoch": now, "ts": "smoke", "ok": True,
+        "config_key": config_key or "",
         "buckets": {
             "session": {"pct": 1, "resets_epoch": now + 14400,
                         "window_seconds": 18000, "label": None},
