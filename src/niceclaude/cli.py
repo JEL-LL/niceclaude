@@ -296,6 +296,10 @@ def sample_once():
         # Which account sampled, so load_log can drop another account's records
         # from a log two accounts share under one NICECLAUDE_DIR (plan D11).
         "config_key": ACCOUNT_KEY,
+        # Which login that config dir held when it sampled (plan D8), or None
+        # when it cannot be told. Diagnostic: `check` reads it, nothing paces
+        # on it.
+        "account": read_account(),
         "elapsed_ms": elapsed_ms,
         "exit_code": rc,
         "raw": raw,                       # verbatim: the parser stays re-runnable
@@ -337,11 +341,16 @@ def publish_state(rec):
     accounts apart -- a shared NICECLAUDE_DIR is one directory for all of them
     -- so the hook and `status` check the stamp (hook.load_state) and ignore a
     snapshot another account wrote.
+
+    The `account` identity is copied from the record rather than read again,
+    so the snapshot and the log line it came from cannot disagree. `check`
+    compares it across account directories; the hook ignores it.
     """
     write_atomic(STATE_PATH, json.dumps({
         "ts_epoch": rec["ts_epoch"],
         "ts": rec["ts"],
         "config_key": ACCOUNT_KEY,
+        "account": account_pair(rec.get("account")),
         "ok": rec["exit_code"] == 0 and bool(rec["buckets"]),
         "buckets": {
             k: {"pct": b["pct"], "resets_epoch": b["resets_epoch"],
@@ -461,12 +470,88 @@ def load_log():
     return out
 
 
+def account_changes(records):
+    """Lines naming each point where this log's login changed (plan D8).
+
+    A `/login` to a different account inside one config dir shows up here and
+    nowhere else: the config key stays the same, so load_log keeps both sides.
+    A record with no `account`, or with None, is unknown and is skipped rather
+    than compared. Records from before Phase 3 carry none, and neither does a
+    sample taken while `.claude.json` had no `oauthAccount`, as under a
+    set-to-default CLAUDE_CONFIG_DIR; calling either a change would cry wolf.
+    The UUIDs themselves are not printed: the timestamps are what a person
+    needs to find the switch, and the log already holds the rest.
+    """
+    out, last = [], None
+    for rec in records:
+        acct = account_pair(rec.get("account")) if isinstance(rec, dict) else None
+        if acct is None:
+            continue
+        if last is not None and acct != last[0]:
+            out.append(f"{rec.get('ts')}  the login changed (the previous one "
+                       f"was last seen {last[1]}); usage on either side is a "
+                       f"different account's")
+        last = (acct, rec.get("ts"))
+    return out
+
+
+def shared_account_dirs():
+    """Lines naming account directories whose snapshots carry one login.
+
+    Two config dirs logged in to the same account and organization are one
+    budget sampled twice -- usually a stray `/login` -- which neither account's
+    own log can show. So this reads `account` from ROOT_DIR/state.json and from
+    each ROOT_DIR/accounts/*/state.json. Those are small files; another
+    account's usage.jsonl is never opened, since load_log would filter it
+    anyway. A snapshot with no usable `account` is unknown, never a match.
+    The paths are built here, from ROOT_DIR, so tests can pin them.
+    """
+    dirs = [ROOT_DIR]
+    accounts = os.path.join(ROOT_DIR, "accounts")
+    try:
+        names = sorted(os.listdir(accounts))
+    except OSError:
+        names = []
+    dirs += [os.path.join(accounts, n) for n in names]
+    seen = {}
+    for d in dirs:
+        # RecursionError as well: one pathologically nested sibling snapshot
+        # must cost its own note, not the whole of `check`. Caught here rather
+        # than in hook.load_json, which is on the hook's hot path.
+        try:
+            st = hook.load_json(os.path.join(d, "state.json"), None)
+        except RecursionError:
+            st = None
+        acct = account_pair(st.get("account")) if isinstance(st, dict) else None
+        if acct is not None:
+            pair = (acct["accountUuid"], acct["organizationUuid"])
+            # With its age: a stopped account's last snapshot stays on disk
+            # indefinitely, and a note about the present needs to show when
+            # each side was last true.
+            ts = st.get("ts")
+            seen.setdefault(pair, []).append(
+                f"{d} (last sampled {ts})" if ts else d)
+    return [f"one login in {len(ds)} account directories: {', '.join(ds)}"
+            for ds in seen.values() if len(ds) > 1]
+
+
+def print_account_notes(lines):
+    """Identity findings are notes, not PROBLEMs: they say whose usage the
+    history is, not that the parser misread it, so they leave the exit code
+    alone. A login change usually explains a `usage DECREASED` beside it."""
+    for line in lines:
+        print(f"note: {line}")
+
+
 def cmd_check():
     """Misparse detector. Runs over the whole history, so a parser fix can be
     re-validated against every sample ever taken."""
     records = load_log()
+    # Asked even with no log of our own: it reads only the snapshots.
+    shared = shared_account_dirs()
     if not records:
         print("no records")
+        print_account_notes(shared)
         return 1
     problems, prev = [], {}
     for rec in records:
@@ -527,6 +612,7 @@ def cmd_check():
         print(f"note: buckets appeared after the first sample: {sorted(late)}")
     span_h = (records[-1]["ts_epoch"] - records[0]["ts_epoch"]) / 3600
     print(f"{len(records)} samples over {span_h:.1f}h; buckets: {sorted(all_keys)}")
+    print_account_notes(account_changes(records) + shared)
     if problems:
         print(f"\n{len(problems)} PROBLEM(S):")
         for p in problems:
@@ -592,6 +678,81 @@ def claude_settings_path():
     """
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
     return os.path.join(base, "settings.json")
+
+
+def claude_global_config_path():
+    """Claude Code's global config, the file that carries `oauthAccount`.
+
+    `<CLAUDE_CONFIG_DIR>/.claude.json` when the variable is set, else
+    `~/.claude.json` -- note the file sits BESIDE the default config dir, not in
+    it. Phase 0 showed Claude reads the first whenever the variable is set,
+    even when it names the default dir (platform-findings section 15). Resolved
+    on each call, like claude_settings_path(), and never derived from
+    ACCOUNT_KEY: the key is normalized for comparison, and is not a spelling
+    Claude itself opens. The call-time lookup also keeps every in-process test
+    on conftest's redirected CLAUDE_CONFIG_DIR, off the developer's real file.
+    """
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    if base:
+        return os.path.join(base, ".claude.json")
+    return os.path.join(HOME, ".claude.json")
+
+
+# Claude writes both as 36-character UUIDs. Checking the shape is what keeps
+# the "only the two UUIDs" promise structural: whatever else a hand-edited or
+# future file puts under those names, nothing that is not UUID-shaped is ever
+# stamped into a record, so an address or a name cannot ride along.
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                      r"[0-9a-f]{12}", re.IGNORECASE)
+
+
+def account_pair(obj):
+    """`obj` as an account identity, or None if it is not one.
+
+    Takes `oauthAccount` from the global config, or an `account` read back
+    from a record or a snapshot, and keeps exactly two fields. The pair, not
+    `accountUuid` alone: limits attach to an organization seat, so one person
+    in a personal org and a team org is two budgets.
+    """
+    if not isinstance(obj, dict):
+        return None
+    pair = {}
+    for name in ("accountUuid", "organizationUuid"):
+        value = obj.get(name)
+        if not isinstance(value, str) or not _UUID_RE.fullmatch(value):
+            return None
+        # Lowercased: the regex accepts either case, and both consumers
+        # compare strings, so a case change in Claude's file would otherwise
+        # read as a new login. Applied on read-back too, so old records agree.
+        pair[name] = value.lower()
+    return pair
+
+
+def read_account():
+    """This config dir's account identity, or None when it cannot be told.
+
+    Diagnostic only (plan D8): read once per sample by the CLI, never by the
+    hook, because the file is tens of KB and grows with project history --
+    fine once per poll, wrong once per tool call. None covers a missing or
+    unreadable file, malformed JSON, and a file with no `oauthAccount`, which
+    is both the API-key user and a set-to-default CLAUDE_CONFIG_DIR whose fresh
+    `.claude.json` has not been logged into yet. None means unknown, and
+    `check` never reads it as a change.
+
+    The plain json parser is the right one here. `projects` keys that differ
+    only by drive-letter case are distinct keys to it, and a duplicated
+    `oauthAccount` resolves to the last, so neither raises. Nothing but the
+    two UUIDs leaves this function: the email and names in the same object are
+    dropped with the parsed file.
+    """
+    try:
+        with open(claude_global_config_path(), encoding="utf-8") as fh:
+            config = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return account_pair(config.get("oauthAccount"))
 
 
 def is_our_hook(entry):

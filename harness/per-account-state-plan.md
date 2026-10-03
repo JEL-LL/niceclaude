@@ -1247,6 +1247,28 @@ Each assumption is marked in the code where it is relied on.
 
 ### Phase 3 — the account identity (diagnostic)
 
+**Status: built, not yet committed; 597 passed (568 before).**
+
+- **Built.** `cli.claude_global_config_path()`, resolved at call time like
+  `claude_settings_path()`; `cli.read_account()` and `cli.account_pair()`;
+  `account` in `sample_once`'s record and, copied from it, in
+  `publish_state`'s snapshot; `check`'s `account_changes` and
+  `shared_account_dirs`; `tests/test_account_identity.py`. The hook is
+  untouched.
+- **The pair is kept only if UUID-shaped.** `account_pair` accepts two
+  canonical 8-4-4-4-12 hex UUIDs, in either case, stored lowercased so that
+  a case change never reads as a new login, and nothing else, so the "only the two
+  UUIDs" rule holds even for a hand-edited file. Anything else is `None`.
+- **Notes, not problems.** Both identity findings print as `note:` lines and
+  leave `check`'s exit code alone: they say whose usage the log holds, not
+  that the parser misread it. A login change usually explains a `usage
+  DECREASED` beside it. Neither prints a UUID; the change names timestamps,
+  and the shared-login line names directories.
+- **Asked with no log.** `check` still runs the shared-login scan, which reads
+  only `state.json` files, when this account has no records.
+- **`check`'s help text is unchanged.** Describing the notes is left to
+  Phase 4's docs.
+
 - **Scope:**
   - Read `oauthAccount.{accountUuid, organizationUuid}` from the global config
     at the location Phase 0 confirmed, in the CLI only.
