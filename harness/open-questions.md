@@ -225,3 +225,27 @@ Also worth checking on a Mac with two accounts: `config_key` assumes that a
 config dir resolving to `~/.claude` (through a symlink, say) is the default
 login. On macOS the keychain entry may be keyed on the directory's spelling, so
 it could be the same dir but not the same login.
+
+---
+
+## 11. Sighting: `write_atomic` leaks `state.json.tmp.<pid>` on Windows
+
+Filed 2026-10-03. Not fixed, and not part of issue #1.
+
+The live data dir (`%LOCALAPPDATA%\niceclaude`) held 39 stray
+`state.json.tmp.<pid>` files, dated 2026-09-30 to 2026-10-02. That is
+roughly one an hour of refreshing.
+
+**Likely cause, unverified:** `cli.write_atomic` writes `<path>.tmp.<pid>` and
+then calls `os.replace`. On Windows, `os.replace` raises `PermissionError`
+while another process holds the target open, for example a hook reading
+`state.json` at that moment. Nothing removes the temp file on that path, so
+it is left behind, and that publish is lost: the snapshot stays one sample
+older. On POSIX a rename over an open file succeeds, so this is Windows-only.
+
+**To check:** whether the exception reaches `refresh`/`watch` and what they
+log, and how often it happens.
+
+**Likely fix:** retry `os.replace` briefly on `PermissionError`, then remove
+the temp file in a `finally` if it still exists. One leftover temp file per
+pid would also be enough for a later run to clean up.
