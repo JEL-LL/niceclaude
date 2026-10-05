@@ -171,10 +171,34 @@ record in the caller's transcript:
   and if that is missing, search under `dirname(transcript_path)` for
   `agent-<agent_id>.jsonl`
 
-The user's bash sketch reads the file backwards (`tac`) and stops at the first
-assistant record. Write it in pure Python for portability: seek to the end and
-read blocks backwards until a parseable assistant line turns up, so the hot
-path never reads a whole transcript.
+The user's working proof of concept, verbatim (2026-10-02). This is the
+approach to port, not a question of whether it can be done. Write it in pure
+Python for portability, without `jq` or `tac`.
+
+```bash
+#!/usr/bin/env bash
+# resolve-model.sh — prints the model for whoever triggered this hook
+input=$(cat)
+main=$(jq -r '.transcript_path' <<<"$input")
+sid=$(jq -r '.session_id' <<<"$input")
+aid=$(jq -r '.agent_id // empty' <<<"$input")
+
+last_model() { tac "$1" 2>/dev/null | jq -r 'select(.type=="assistant") | .message.model // empty' | head -n1; }
+
+if [[ -n "$aid" ]]; then
+  t="$(dirname "$main")/$sid/subagents/agent-$aid.jsonl"
+  [[ -f "$t" ]] || t=$(find "$(dirname "$main")" -name "agent-$aid.jsonl" 2>/dev/null | head -n1)
+  model=$(last_model "$t")
+else
+  model=$(last_model "$main")
+fi
+echo "${model:-unknown}"
+```
+
+It reads the transcript backwards (`tac`) and stops at the first assistant
+record. In Python, seek to the end and read blocks backwards until a
+parseable assistant line turns up, so the hot path never reads a whole
+transcript.
 
 **Open points for when it is built:**
 
