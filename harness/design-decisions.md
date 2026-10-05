@@ -737,7 +737,10 @@ machinery beyond that.
   model behaves exactly as before, and `decide` ignores `caller_model` under
   it. `--model detect`, stored as `"model": "detect"` (`DETECT`, matched
   case-insensitively), makes `decide` use the family `run` detected instead.
-  With no `--model`, no per-model bucket is enforced, as before. When
+  `detect` is also the default: `cmd_on` writes it into a rule that has no
+  model and is given no `--model` (the user's call, after Phase 2), so the
+  hook never has to guess. A rule with no model, written before that default
+  existed, still enforces no per-model bucket. When
   detection finds nothing, the call has no per-model bucket, and `session`
   and `week` still apply.
 

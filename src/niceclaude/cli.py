@@ -1742,6 +1742,12 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
     entry["paced"] = True
     if model:
         entry["model"] = model
+    elif not entry.get("model"):
+        # `detect` is the default, written into the rule rather than assumed
+        # by the hook. Every rule on disk then says what it does, and a rule
+        # written before this default existed keeps its meaning until `on`
+        # is next run against it. A declared model is never replaced.
+        entry["model"] = hook.DETECT
     if m0 is not None:
         entry["m0"] = m0
     if m1 is not None:
@@ -1807,10 +1813,6 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
     pol["paths"][key] = entry
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
-    if not entry.get("model"):
-        print("note: no model declared, so the per-model weekly bucket will "
-              "not be enforced. --model detect paces each call on the model "
-              "that made it.")
 
     # The max_delay the hook will actually apply here, resolved the way the
     # hook resolves it -- a rule's null means no cap, not "inherit".
@@ -2888,9 +2890,11 @@ work resumes with a band of headroom instead of a fraction of a percent. With
 --band-delay the space between the lines becomes a lower gear -- one hold per
 tool call, taken while still under the pace line -- rather than a free run.
 
-The per-model weekly bucket is enforced only when --model is declared.
---model detect reads each caller's model from its own transcript, so a
-subagent on another model than its parent is paced on its own bucket.
+The per-model weekly bucket is enforced per call under `detect`, the
+default for a rule with no model: each caller's model is read from its own
+transcript, so a subagent on another model than its parent is paced on its
+own bucket. --model opus (or fable, sonnet ...) paces every call as that
+model instead. To enforce no per-model bucket, use --enforce session,week.
 
 Subagents (and workflows, teammates, compaction) get a 5-minute prompt cache
 by default, even on a subscription; since Claude Code v2.1.242 the
@@ -3229,11 +3233,12 @@ def build_parser():
                    help="the folder to pace; subfolders inherit the rule "
                         "unless a deeper rule overrides it")
     o.add_argument("--model",
-                   help="the model sessions in this folder run as (opus, "
-                        "sonnet, fable ...), or `detect` to read each "
-                        "caller's model from its transcript. It selects the "
-                        "per-model weekly bucket, which goes unenforced "
-                        "without it")
+                   help="`detect` (the default for a rule with no model) "
+                        "reads each caller's model from its transcript; or "
+                        "name the model every session here runs as (opus, "
+                        "sonnet, fable ...). It selects the per-model weekly "
+                        "bucket. A rule's existing model is kept unless this "
+                        "is given")
     o.add_argument("--m0", type=float, metavar="PCT",
                    help="starting allowance, in percent of the window "
                         "(default: the policy's, initially 5). Without it "

@@ -34,6 +34,12 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **`niceclaude on` defaults to `--model detect`.** A new rule given no
+  `--model` is written as `"model": "detect"`, as is an existing rule that
+  has no model yet. A rule that already names a model keeps it, and the hook
+  reads `policy.json` as before, so no rule changes until `on` is run against
+  it. To pace a folder on no per-model bucket, use `--enforce session,week`.
+
 - **Each Claude account keeps its own usage state** (issue #1). Sessions
   started with `CLAUDE_CONFIG_DIR` set used to share one `state.json` with
   every other account, so one account was paced on another's numbers — held

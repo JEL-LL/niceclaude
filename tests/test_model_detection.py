@@ -630,11 +630,53 @@ def test_status_marks_model_buckets_per_call(tmp_path, monkeypatch, capsys):
             == rows["session"].index("| ENFORCED"))
 
 
-def test_on_without_a_model_suggests_detect(tmp_path, monkeypatch, capsys):
+def _on(target, model):
+    assert cli.cmd_on(str(target), model=model, m0=None, m1=None,
+                      fanout_reserve=None, enforce=None, max_delay=None) == 0
+    return cli.load_policy()["paths"][norm_path(str(target))]
+
+
+@pytest.fixture
+def proj(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "POLICY_PATH", str(tmp_path / "policy.json"))
     target = tmp_path / "proj"
     target.mkdir()
-    cli.cmd_on(str(target), model=None, m0=None, m1=None, fanout_reserve=None,
-               enforce=None, max_delay=None)
-    out = capsys.readouterr().out
-    assert "--model detect" in out and "cannot discover" not in out
+    return target
+
+
+def test_on_defaults_a_new_rule_to_detect(proj):
+    """`detect` is the default, and it is written into the rule rather than
+    assumed by the hook, so policy.json says what is in force."""
+    assert _on(proj, None)["model"] == "detect"
+
+
+@pytest.mark.parametrize("declared", ["opus", "fable"])
+def test_on_without_a_model_keeps_the_rules_model(proj, declared):
+    _on(proj, declared)
+    assert _on(proj, None)["model"] == declared
+
+
+def test_on_gives_a_rule_with_no_model_the_default(proj):
+    """A rule written before the default existed has no model. It keeps that
+    meaning until `on` is next run against it, which fills the default in."""
+    pol = {"paths": {norm_path(str(proj)): {"paced": True, "m1": 3}}}
+    cli.save_policy(pol)
+    entry = _on(proj, None)
+    assert entry["model"] == "detect" and entry["m1"] == 3
+
+
+def test_an_explicit_model_replaces_the_default(proj):
+    _on(proj, None)
+    assert _on(proj, "fable")["model"] == "fable"
+
+
+def test_a_defaulted_rule_paces_per_call(proj):
+    """The default end to end: a rule made by a bare `on` paces a Fable caller
+    on week:Fable and lets an Opus caller past it."""
+    _on(proj, None)
+    pol = cli.load_policy()
+    cwd = norm_path(str(proj))
+    assert hook.decide(pol, snapshot(), cwd, NOW,
+                       caller_model="fable")["braked"]
+    assert not hook.decide(pol, snapshot(), cwd, NOW,
+                           caller_model="opus")["braked"]

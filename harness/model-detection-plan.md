@@ -57,7 +57,9 @@ agent too, so once that bucket is spent every call lags, Opus included.
   `--model detect` reads the model per call. With no `--model`, no per-model
   bucket is enforced, as today. So there is no precedence to resolve. When
   detection finds nothing, the call simply has no per-model bucket. `session`
-  and `week` still apply. Stored as `"model": "detect"`, matched
+  and `week` still apply. (Superseded after Phase 2: `detect` is now the
+  default `cmd_on` writes for a rule with no model; `design-decisions.md`
+  §20 D1.) Stored as `"model": "detect"`, matched
   case-insensitively.
 - **D2 — `SubagentStart` does not detect.** Its subagent transcript does not
   exist yet (Phase 0, all three runs). Under `detect` it gets no per-model
@@ -91,7 +93,8 @@ agent too, so once that bucket is spent every call lags, Opus included.
 - **D8 — `status` and `on` change wording only.** `status` has no caller to
   detect from, so under `detect` it marks a model bucket `per call` rather
   than ENFORCED or ignored. The `on` note for an undeclared model now
-  suggests `--model detect`.
+  suggests `--model detect`. (That note was dropped when `detect` became
+  the default.)
 
 - **D9 — a missing per-model bucket is ignored under `detect`** (the user's
   call, settled during Phase 1 review). With only `model` enforced, a caller

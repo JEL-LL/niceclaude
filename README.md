@@ -722,14 +722,18 @@ its own weekly budget and the shared one, while Opus and Sonnet have no
 per-model bucket at all. Today the only per-model bucket is `week:Fable`, so in
 practice the choice is whether a call answers to the Fable line or not.
 
-There are two ways to say which model that is.
+There are two ways to say which model that is. Detecting it is the default:
+`niceclaude on` without `--model` writes `"model": "detect"` into a new rule,
+and into an existing rule that has no model yet. A rule that already names a
+model keeps it unless `--model` is given.
 
 **Declare it.** `--model opus` (or `fable`, `sonnet`, ...) paces every call in
 the folder as that model, main agent and subagents alike. That is how it always
-worked, and it still works exactly that way. A folder with no `--model`
-enforces no per-model bucket.
+worked, and it still works exactly that way. A rule written by an older
+version with no model enforces no per-model bucket until `on` is next run
+against it.
 
-**Or detect it, per call.** `--model detect` reads the model from the
+**Or detect it, per call.** `detect`, the default, reads the model from the
 transcript of whoever made the call: the main agent's `transcript_path`, or a
 subagent's own transcript when `agent_id` is set. The model is the
 `message.model` of the newest assistant record, read backwards from the end of
