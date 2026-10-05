@@ -149,7 +149,202 @@ def paced_entry(policy, cwd):
     return match[1]
 
 
-def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
+# --- per-call model detection (`--model detect`) ----------------------------
+#
+# No hook payload carries the model, but every caller has a transcript, and
+# its last assistant record says which model wrote it. A folder that declares
+# `detect` is paced on that, call by call, so an Opus organizer and its Fable
+# subagents each answer to their own per-model bucket. A port of the bash
+# proof of concept in open-questions.md section 9; model-detection-plan.md
+# holds the decisions cited as D1-D8 below.
+
+# The stored value of `--model` that asks for detection. Matched
+# case-insensitively, like every other declared model.
+DETECT = "detect"
+
+# Read sizes for the backwards scan. Looked up at call time, so tests can
+# shrink them. The cap bounds the cost of a transcript that has gone a long
+# way without an assistant record: the longest such run measured was 2.5 MB,
+# so 8 MiB is generous, and past it the answer is "unknown" rather than a
+# hook that reads a whole transcript (D6).
+DETECT_BLOCK = 64 * 1024
+DETECT_CAP = 8 * 1024 * 1024
+
+# `message.model` on records Claude Code writes itself rather than a model.
+# It names no bucket, so accepting one would silently drop the model window;
+# the scan steps past it and keeps going (D4).
+SYNTHETIC = "<synthetic>"
+
+
+def model_family(model_id):
+    """The word `model_matches` compares, from a model id, or None.
+
+    claude-fable-5-1 -> fable, claude-haiku-4-5-20251001 -> haiku,
+    us.anthropic.claude-opus-5-5 -> opus. The first purely alphabetic token
+    after `claude`, because the version and date tokens around it vary and
+    the bucket's display name only ever carries the family.
+    """
+    if not isinstance(model_id, str):
+        return None
+    tokens = model_id.lower().replace(".", "-").replace("_", "-").split("-")
+    if "claude" not in tokens:
+        return None
+    for tok in tokens[tokens.index("claude") + 1:]:
+        if tok.isascii() and tok.isalpha():
+            return tok
+    return None
+
+
+def _record_model(line):
+    """`message.model` of one transcript line if it is a usable assistant
+    record, else None. Torn, foreign or garbled lines are simply not one."""
+    # Cheap prefilter: most lines are tool results and user turns, and
+    # parsing them only to throw them away is most of the cost of a scan.
+    if b'"assistant"' not in line:
+        return None
+    try:
+        # Decoded leniently, so one stray non-UTF-8 byte inside a message
+        # does not cost the record its model. A trailing \r (CRLF) is just
+        # whitespace to json.
+        rec = json.loads(line.decode("utf-8", "replace"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(rec, dict) or rec.get("type") != "assistant":
+        return None
+    msg = rec.get("message")
+    model = msg.get("model") if isinstance(msg, dict) else None
+    if not isinstance(model, str) or not model or model == SYNTHETIC:
+        return None
+    return model
+
+
+def _last_model(path):
+    """Scan `path` backwards for the newest usable assistant record.
+
+    The replacement for the PoC's `tac | jq | head -1`. Blocks are read from
+    the end; each block's first line may be the tail of a longer one, so its
+    bytes are kept pending rather than parsed. Pending blocks are only joined
+    when a newline arrives to end the line, so a long line costs one join,
+    not one per block: re-joining a growing carry on every block made a
+    multi-megabyte line quadratic. The file's first line is parsed on its own
+    only once the scan reaches the start, where it is whole.
+    """
+    block = DETECT_BLOCK
+    cap = DETECT_CAP
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        pending = []     # blocks of the current partial line, newest first
+        spent = 0
+        while pos > 0 and spent < cap:
+            n = min(block, pos, cap - spent)
+            pos -= n
+            fh.seek(pos)
+            buf = fh.read(n)
+            spent += n
+            pending.append(buf)
+            if b"\n" not in buf:
+                continue
+            lines = b"".join(reversed(pending)).split(b"\n")
+            pending = [lines[0]]
+            # Newest first. The very last line of the file may be torn by a
+            # write in progress; it fails to parse and is skipped like any
+            # other non-record.
+            for line in reversed(lines[1:]):
+                model = _record_model(line)
+                if model:
+                    return model
+        if pos == 0:
+            return _record_model(b"".join(reversed(pending)))
+    # Out of budget with the file not exhausted: unknown, not a guess.
+    return None
+
+
+def _transcript_of(payload):
+    """The caller's own transcript, or None if it cannot be found.
+
+    The main agent's is `transcript_path`. A subagent's lives under the
+    session's directory beside it; when the derived path is missing, the
+    directory is searched, as the PoC's `find` does. A subagent is never
+    given its parent's transcript (D3): the parent's model is exactly the
+    wrong answer in the case this exists for.
+    """
+    main = payload.get("transcript_path")
+    if not isinstance(main, str) or not main:
+        return None
+    agent = payload.get("agent_id")
+    if not agent:
+        return main
+    if not isinstance(agent, str) or "/" in agent or os.sep in agent:
+        return None
+    base = os.path.dirname(main)
+    name = f"agent-{agent}.jsonl"
+    sid = payload.get("session_id")
+    if isinstance(sid, str) and sid and "/" not in sid and os.sep not in sid:
+        primary = os.path.join(base, sid, "subagents", name)
+        if os.path.isfile(primary):
+            return primary
+    if not base:
+        return None
+    for root, _dirs, files in os.walk(base):
+        if name in files:
+            return os.path.join(root, name)
+    return None
+
+
+def detect_model(payload):
+    """The model id of whoever made this hook call, or None.
+
+    Never raises. A detector that raised would fail the hook open -- `main`
+    lets every call through on an exception -- so anything at all that goes
+    wrong here means "unknown", which costs only the per-model bucket for
+    this one call (D1, D6).
+    """
+    try:
+        if not isinstance(payload, dict):
+            return None
+        # A subagent's transcript does not exist yet at SubagentStart (Phase
+        # 0, every run). Looking would always fail, and the fallback search
+        # would walk the whole project directory on every fan-out, so do not
+        # look at all (D2). Its first tool call is detected instead.
+        if payload.get("hook_event_name") == "SubagentStart":
+            return None
+        path = _transcript_of(payload)
+        return _last_model(path) if path else None
+    except Exception:
+        return None
+
+
+def wants_detection(policy, entry):
+    """Does this rule pace on the caller's model -- `detect`, with the model
+    window enforced? Only then is a transcript worth opening (D5)."""
+    model = entry.get("model")
+    if not isinstance(model, str) or model.lower() != DETECT:
+        return False
+    defaults = policy.get("defaults") or {}
+    return "model" in normalize_enforce(entry.get("enforce",
+                                                  defaults.get("enforce")))
+
+
+def model_tag(policy, entry, caller_model):
+    """`model=<family>(detected|declared)` or `model=none`, for hook.log (D7).
+
+    Says which per-model bucket a hold could have answered to, so `none`
+    also covers a rule that does not enforce the model window at all."""
+    defaults = policy.get("defaults") or {}
+    if "model" not in normalize_enforce(entry.get("enforce",
+                                                  defaults.get("enforce"))):
+        return "model=none"
+    model = entry.get("model")
+    model = model.lower() if isinstance(model, str) else ""
+    if model == DETECT:
+        return (f"model={caller_model}(detected)" if caller_model
+                else "model=none")
+    return f"model={model}(declared)" if model else "model=none"
+
+
+def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
+           caller_model=None):
     """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..,
     'chunk':..,'max_delay':..,'band_delay':..,'region':..,'hold':..}.
 
@@ -184,6 +379,9 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
     back on false as well as null, which silently disabled the kill switch and
     would have turned a configured m0 of 0 into 5. dict.get with a default only
     fires on a missing key.
+
+    `caller_model` is the caller's model family, as `run` detected it, or
+    None. It is read only under a rule that declares `detect`.
     """
     entry = paced_entry(policy, cwd)
     if entry is None:
@@ -229,7 +427,13 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
         # release, which would write a throttle/release pair to hook.log on
         # every tool call for a hold that never happened.
         band_delay = None
-    model = (entry.get("model") or "").lower()
+    model = declared = (entry.get("model") or "").lower()
+    if declared == DETECT:
+        # `caller_model` is the family `run` read from the caller's own
+        # transcript. Passed in rather than read here, so this stays pure.
+        # Unknown means no per-model bucket for this call; session and week
+        # still apply (D1). Under any declared model it is ignored.
+        model = (caller_model or "").lower()
 
     # Which windows this folder answers to. A project you are actively tending
     # may want the 5-hour line to smooth it out while ignoring the weekly line,
@@ -242,6 +446,25 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False):
         or (k == "week:all models" and "week" in enforce)
         or ("model" in enforce and model_matches(k, model))
     ]
+    if (not enforced and declared == DETECT and buckets
+            and enforce == {"model"}):
+        # Under `detect`, a caller with no per-model bucket -- an Opus call, an
+        # unknown model, a SubagentStart -- is bound by nothing when `model` is
+        # the only window enforced. That is "nothing applies", not "cannot
+        # see": the snapshot is there and was read. Falling through would
+        # brake it blind, uncapped by default, and freeze the organizer until
+        # the harness timeout. An empty snapshot still goes blind below, and
+        # so does one missing an enforced session or week bucket (the cp1252
+        # misparse in sample_once leaves only week:Fable): that is "cannot
+        # see", exactly as under a declared model.
+        # A missing per-model row is ignored, whoever the caller is. The
+        # renderer drops a row whose utilization is null, so a Fable caller
+        # with no week:Fable row may have one that is merely unrendered; it
+        # runs free rather than freezing. The user chose that over a list of
+        # which families have buckets (model-detection-plan.md, D9).
+        return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
+                "max_delay": max_delay, "band_delay": band_delay,
+                "region": "free", "blind": False}
     if not enforced:
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": now + chunk,
@@ -396,8 +619,12 @@ def snapshot_age(state, now):
     return now - ts
 
 
-def run(cwd, event=None):
+def run(cwd, event=None, payload=None):
+    # `payload` is the hook's stdin, read only to detect the caller's model.
     brake_start = None
+    caller = None        # the caller's model family, under `detect` only
+    detected = False     # detection is tried at most once per invocation: a
+                         # frozen agent cannot change model while frozen (D5)
     fails = 0            # consecutive failed refreshes, indexes REFRESH_BACKOFF
     next_try = 0.0       # earliest time we may attempt another refresh
     was_blind = False
@@ -428,8 +655,16 @@ def run(cwd, event=None):
         # Cheapest possible gate, and it must come first: an unpaced folder
         # needs no usage data, so it must never trigger a refresh. This is the
         # common case -- every foreground session, on every tool call.
-        if paced_entry(policy, cwd) is None:
+        entry = paced_entry(policy, cwd)
+        if entry is None:
             return brake_start, "unpaced"
+
+        # After the gate, so an unpaced folder never opens a transcript, and
+        # only for a rule that asks for it. Re-checked each pass so a policy
+        # switched to `detect` mid-hold is honoured, but tried only once.
+        if not detected and wants_detection(policy, entry):
+            detected = True
+            caller = model_family(detect_model(payload))
 
         # Another account's snapshot loads as {}, so its age is None and the
         # refresh below runs: one refresh replaces it with our own.
@@ -437,7 +672,7 @@ def run(cwd, event=None):
         age = snapshot_age(state, now)
         degraded = age is None or age > MAX_STALE
         d = decide(policy, state, cwd, now, degraded=degraded, event=event,
-                   hard=hard)
+                   hard=hard, caller_model=caller)
 
         # How fresh the snapshot must be depends on where the last one said we
         # stand. Well under the throttle line, MAX_STALE is plenty. At or above
@@ -462,7 +697,7 @@ def run(cwd, event=None):
             age = snapshot_age(state, now)
             degraded = age is None or age > MAX_STALE
             d = decide(policy, state, cwd, now, degraded=degraded, event=event,
-                       hard=hard)
+                       hard=hard, caller_model=caller)
         first = False
 
         if not d.get("paced"):
@@ -487,7 +722,10 @@ def run(cwd, event=None):
             # registered timeout -- which is the only way that failure is ever
             # visible. `grep ' brake '` still counts real brakes.
             verb = "throttle" if soft else "brake  "
-            log(f"{verb} cwd={cwd} [{event or 'PreToolUse'}] {d.get('reason', '')}")
+            # The model tag goes last, after the reason, so every reader that
+            # matches on the verb or the cwd= field sees the line unchanged.
+            log(f"{verb} cwd={cwd} [{event or 'PreToolUse'}] "
+                f"{d.get('reason', '')} {model_tag(policy, entry, caller)}")
         elif was_soft and not soft:
             # A throttle that escalated: a sibling or the foreground session
             # pushed us over the brake line mid-hold, and this is now an
@@ -498,7 +736,7 @@ def run(cwd, event=None):
             was_soft = False
             was_blind = d.get("blind", False)
             log(f"brake  cwd={cwd} [escalated from throttle] "
-                f"{d.get('reason', '')}")
+                f"{d.get('reason', '')} {model_tag(policy, entry, caller)}")
         elif d.get("blind", False) != was_blind:
             # Crossing between "over the line" and "cannot see" mid-brake is a
             # material change in why we are stopped; record it.
@@ -600,7 +838,7 @@ def main():
         return 0
 
     try:
-        brake_start, why = run(cwd, payload.get('hook_event_name'))
+        brake_start, why = run(cwd, payload.get('hook_event_name'), payload)
     except Exception as exc:
         # Fail open. A bug in here must never wedge every session; the daemon
         # and `niceclaude check` are where problems should surface.

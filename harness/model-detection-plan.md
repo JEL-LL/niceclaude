@@ -5,8 +5,11 @@ whoever made it, rather than on one declared model. The approach is the user's p
 `open-questions.md` §9 (`resolve-model.sh`), ported to pure Python. It is not
 re-evaluated here. Symbols are cited by name, not line number.
 
-**Status: Phase 0 done. Q1 settled (`--model detect`, D1). Building awaits
-confirmation of the phase split (§5).**
+**Status: Phase 0 done. Q1 settled (`--model detect`, D1). Phase 1 built
+(`detect_model`, `model_family` and the wiring in `hook.py`, D8's wording in
+`cli.py`, `tests/test_model_detection.py`), reviewed through four same-model rounds and a Fable gate (D9 settled
+the last open behaviour);
+Phase 2's paperwork is still to do.**
 
 **Scale check.** The only per-model bucket that exists is `week:Fable`, so in
 practice this decides one thing per call: pace on the Fable line or not. It
@@ -86,6 +89,19 @@ agent too, so once that bucket is spent every call lags, Opus included.
   than ENFORCED or ignored. The `on` note for an undeclared model now
   suggests `--model detect`.
 
+- **D9 — a missing per-model bucket is ignored under `detect`** (the user's
+  call, settled during Phase 1 review). With only `model` enforced, a caller
+  that matches no per-model row runs free, whoever it is. "If you are just
+  supposed to hold on Fable and you don't have Fable information, you don't
+  just stop and catch fire, you just run free." The case this lets through: a
+  Fable call whose `week:Fable` row is unrendered, because its utilization
+  is null, runs unpaced under `--enforce model`. The row was present in 35,330
+  of 35,330 samples. Rejected alternatives:
+  - a list of the families that have buckets (fails safe, but needs upkeep);
+  - a blind hold, as for a declared model (it freezes the organizer).
+  An enforced `session` or `week` bucket that is missing still means
+  "cannot see", and brakes blind as before.
+
 ## 4. Phase 0 results — measured, no code
 
 Probe: `<scratch>/probe9/probe.py`, registered for `PreToolUse` and
@@ -122,7 +138,7 @@ inheriting subagent. Full write-up: `platform-findings.md` §16.
   and a Fable subagent are therefore told apart on every tool call. The only
   blind spot is `SubagentStart` (D2).
 
-## 5. Phases — proposed, awaiting confirmation
+## 5. Phases — confirmed
 
 Two build phases. The original three split the detector from its wiring, but
 with D1 the wiring is a few lines in `decide` and a value `on` accepts. A
@@ -143,7 +159,9 @@ detector committed without them would be dead code.
       boundary, CRLF, non-UTF-8 bytes, and the 8 MiB cap;
     - every id in §4;
     - an Opus parent with a Fable subagent, end to end through `decide`.
-  - Keep green: everything, unedited.
+  - Keep green: everything. The one edit to an existing test is
+    `tests/test_exempt.py` `fake_run`, which takes the new `payload`
+    argument `main` now passes to `run`.
 - **Phase 2 — paperwork.** `README.md` *Declaring the model*, a new
   decision in `design-decisions.md`, `open-questions.md` §9 marked resolved,
   `CHANGELOG.md`, and a `test-matrix.md` row.
@@ -156,4 +174,4 @@ until quiet, a Fable gate, then commit.
 - **Q1** — settled: `--model detect` (D1).
 - **Q2** — settled by D1: `SubagentStart` under `detect` has no per-model
   bucket. Its first tool call does.
-- **Q3.** Is the two-phase split in §5 OK?
+- **Q3** — settled: the two-phase split in §5. Phase 1 is built on it.

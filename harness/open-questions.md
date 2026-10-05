@@ -288,3 +288,20 @@ log, and how often it happens.
 **Likely fix:** retry `os.replace` briefly on `PermissionError`, then remove
 the temp file in a `finally` if it still exists. One leftover temp file per
 pid would also be enough for a later run to clean up.
+
+---
+
+## 12. Sighting: a declared model with no bucket, enforcing only `model`, brakes blind forever
+
+Filed 2026-10-05, found in the Phase 1 review of model detection. Not fixed.
+It predates `detect` and does not depend on it.
+
+A rule such as `{"model": "opus", "enforce": ["model"]}` names a model that
+has no per-model bucket (no `week:Opus` exists). `decide`'s enforced set is
+then empty, so every call takes the hard "no usable buckets in snapshot"
+blind brake. Under the default `max_delay` (none) that hold is uncapped and
+runs to the harness timeout. The `detect` form of the same case is fixed in
+`decide`. Under `detect` with only `model` enforced, a caller with no
+matching row runs free (`model-detection-plan.md` D9). The declared form is
+not fixed. The user's stated preference in D9, "just ignoring a missing
+bucket", suggests fixing it the same way.

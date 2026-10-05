@@ -1808,8 +1808,9 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
     save_policy(pol)
     print(f"paced: {key} -> {json.dumps(entry)}")
     if not entry.get("model"):
-        print("note: no model declared. The hook cannot discover the running "
-              "model, so the per-model weekly bucket will not be enforced.")
+        print("note: no model declared, so the per-model weekly bucket will "
+              "not be enforced. --model detect paces each call on the model "
+              "that made it.")
 
     # The max_delay the hook will actually apply here, resolved the way the
     # hook resolves it -- a rule's null means no cap, not "inherit".
@@ -2242,6 +2243,16 @@ def cmd_status(path):
             or (k == "week:all models" and "week" in enforce)
             or ("model" in enforce and model_matches(k, model)))
         mark = "ENFORCED" if enforced else "ignored "
+        # Under `detect` a model bucket binds some calls and not others, and
+        # `status` has no caller to read a model from. Saying ENFORCED or
+        # ignored would each be wrong for half of them. Same width as both.
+        if (active and model == hook.DETECT and "model" in enforce
+                and k.lower().startswith("week:")
+                and k.lower() != "week:all models"):
+            mark = "per call"
+            # The hold column reports what happens to a caller on this model,
+            # and that caller IS held; "would hold" would read as switched off.
+            enforced = True
         p = bucket_pace(b, now, m0, m1, band)
         if p is None:
             print(f"  {k:22} unusable (no percentage)")
@@ -2266,6 +2277,12 @@ def cmd_status(path):
     # What the hook itself would decide, from this same snapshot -- asked of
     # the hook rather than recomputed, so `status` cannot claim a folder is
     # running while the hook is holding it.
+    if active and model == hook.DETECT and "model" in enforce:
+        # Asked with no caller, so the verdict cannot see a `per call` row.
+        # Without this it says "running" while those rows hold Fable for days.
+        print("\n  (verdict below is for a caller with no per-model bucket; a "
+              "caller whose model\n   has a `per call` row above also answers "
+              "to that row)")
     d = hook.decide(pol, st, key, now, degraded=age > MAX_STALE)
     print()
     if not d.get("paced"):
@@ -2871,8 +2888,9 @@ work resumes with a band of headroom instead of a fraction of a percent. With
 --band-delay the space between the lines becomes a lower gear -- one hold per
 tool call, taken while still under the pace line -- rather than a free run.
 
-The hook cannot discover the running model, so the per-model weekly bucket is
-enforced only when --model is declared.
+The per-model weekly bucket is enforced only when --model is declared.
+--model detect reads each caller's model from its own transcript, so a
+subagent on another model than its parent is paced on its own bucket.
 
 Subagents (and workflows, teammates, compaction) get a 5-minute prompt cache
 by default, even on a subscription; since Claude Code v2.1.242 the
@@ -3212,9 +3230,10 @@ def build_parser():
                         "unless a deeper rule overrides it")
     o.add_argument("--model",
                    help="the model sessions in this folder run as (opus, "
-                        "sonnet, fable ...). Hooks are not told the model, so "
-                        "it must be declared; it selects the per-model weekly "
-                        "bucket, which goes unenforced without it")
+                        "sonnet, fable ...), or `detect` to read each "
+                        "caller's model from its transcript. It selects the "
+                        "per-model weekly bucket, which goes unenforced "
+                        "without it")
     o.add_argument("--m0", type=float, metavar="PCT",
                    help="starting allowance, in percent of the window "
                         "(default: the policy's, initially 5). Without it "

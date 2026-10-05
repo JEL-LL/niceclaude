@@ -69,7 +69,7 @@ def test_empty_value_does_not_exempt(paced_everything, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(PAYLOAD))
     seen = []
 
-    def fake_run(cwd, event=None):
+    def fake_run(cwd, event=None, payload=None):
         seen.append((cwd, event))
         return None, "unpaced"
 
