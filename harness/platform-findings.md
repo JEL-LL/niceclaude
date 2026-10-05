@@ -577,3 +577,63 @@ Refuted above:
   it.
 - *`CLAUDE_CONFIG_DIR=~/.claude` is the default login (D2)*: the
   credentials are the same, but `.claude.json` is a different file.
+
+---
+
+## 16. What a hook can see of the caller's model (model detection, Phase 0)
+
+Observed on Claude Code **2.1.287**, Windows 10, default account. This is
+Phase 0 of `model-detection-plan.md`. A probe hook registered for
+`PreToolUse` and `SubagentStart` through `claude --settings probe.json -p ...`
+ran from an unpaced scratch dir. Per event it logged payload key *names*, the
+event, `tool_name`, `agent_id` and `agent_type`. For the main transcript, and
+for a subagent's derived
+`<dirname(transcript_path)>/<session_id>/subagents/agent-<agent_id>.jsonl`, it
+logged: exists, size, assistant-record count, distinct `message.model` values,
+the last one read backwards, and that read's time. It logged no tool input and
+no message content.
+
+Three runs. Each prompt ran one Bash command, then one subagent running Bash.
+Run 1 had the main agent on `--model sonnet` and the subagent at
+`model: "haiku"`. Runs 2 and 3 used the default model, with the subagent
+inheriting it.
+
+```
+run 1  PreToolUse Bash   main: 0 records  (file exists, 66 KB)
+       PreToolUse Agent  main: 2 records  claude-sonnet-5-5
+       SubagentStart     sub file: does not exist
+       PreToolUse Bash   sub:  2 records  claude-haiku-4-5-20251001
+       PreToolUse Bash   sub:  4 records  claude-haiku-4-5-20251001
+runs 2, 3 (identical shape)
+       PreToolUse Bash   main: 1 record   claude-opus-5-5
+       PreToolUse Agent  main: 2 records  claude-opus-5-5
+       SubagentStart     sub file: does not exist
+       PreToolUse Bash   sub:  1 record   claude-opus-5-5
+       PreToolUse Bash   main: 3 records  claude-opus-5-5
+```
+
+- **`SubagentStart` fires before the subagent's transcript exists.** This held
+  in every run, so a subagent's model cannot be read from its own transcript
+  at `SubagentStart`.
+- **A subagent's first `PreToolUse` already sees its own assistant record**,
+  at the derived primary path, in every run. A search of
+  `dirname(transcript_path)` found the same file.
+- **The main agent's first `PreToolUse` races the transcript write.** Twice it
+  saw the record. Once it saw a 66 KB file with none. Detection on a session's
+  first call is therefore likely, not guaranteed.
+- **No payload carries a `model` key**, still (cf. §6). `SubagentStart` keys:
+  `agent_id, agent_type, cwd, hook_event_name, prompt_id, session_id,
+  transcript_path`.
+- **Cost.** A backwards block read to the last assistant record took
+  0.2–0.35 ms. A full `os.walk` of a 9,750-file project dir, looking for a
+  name that is not there, took 17 ms warm.
+- **Ids in the wild.** Across all 34,061 local transcripts, `message.model` on
+  assistant records took the values `claude-opus-5-5`, `claude-fable-5-1`,
+  `claude-opus-5`, `claude-opus-4-8`, `claude-fable-5`,
+  `claude-haiku-4-5-20251001`, `claude-sonnet-5`, `claude-sonnet-5-5` and
+  `<synthetic>` (13 records). The longest single line was 1.36 MB. The longest
+  run of non-assistant bytes between assistant records was 2.57 MB.
+- **Buckets in the wild.** `usage.jsonl` has only ever recorded `session`,
+  `week:all models` and `week:Fable`. `model_matches("week:Fable",
+  "claude-fable-5-1")` is False, because it compares a whole word, so a
+  detected id needs mapping to its family word first.

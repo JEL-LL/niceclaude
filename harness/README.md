@@ -17,6 +17,7 @@ Everything here is technical and public-safe.
 | `windows-handoff.md` | **Self-contained brief for an agent on Windows** — the one platform still unverified |
 | `windows-results.md` | Created by whoever runs the Windows checks |
 | `freeze-validation.md` | Evidence for the 3-hour freeze |
+| `model-detection-plan.md` | Plan for detecting the model per hook call (`open-questions.md` §9) |
 
 ## The one-paragraph summary
 

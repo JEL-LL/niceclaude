@@ -154,6 +154,9 @@ mechanically sound and behaviourally unproven.
 Filed 2026-10-02 at the user's request, to be built later; it is not part of
 issue #1.
 
+**Planned 2026-10-05:** `model-detection-plan.md`. Phase 0 is done and
+recorded in `platform-findings.md` §16.
+
 **The problem.** A folder declares its model (`--model`), and the `model`
 window is checked against that. A session that runs on one model but spawns
 subagents on another, for example Opus with Fable subagents, gets paced on
