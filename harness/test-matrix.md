@@ -7,8 +7,8 @@ Run this first on any new platform.
 
 ## Automated first
 
-Most of the logic below is now covered by a real suite — 52 tests, no network,
-no tokens, runs in under a second:
+Most of the logic below is now covered by a real suite: no network, no tokens,
+and a few seconds to run:
 
 ```bash
 uv run --with pytest pytest tests/ -q

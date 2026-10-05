@@ -8,7 +8,12 @@ matter.
 
 ---
 
-## 1. Windows is unverified — the deployment blocker
+## 1. ~~Windows is unverified — the deployment blocker~~ — RESOLVED
+
+**Resolved:** `windows-results.md` records the first Windows run. The hook is
+invoked synchronously and blocks, so the freeze works. The three Windows-only
+bugs it found are fixed, with regression tests. Windows has since been the
+main development and daily-use platform. The original entry follows.
 
 The code is platform-neutral (`%LOCALAPPDATA%`/`%APPDATA%`, `normcase`+`normpath`
 paths, `ctypes` liveness, `taskkill`, quoting for spaced hook paths) but **not one
@@ -70,6 +75,14 @@ yields roughly 7 hours of real work. That answers "is this worth running" —
 yes — but from a 4-hour sample of one workload. Re-run after a few days of
 genuine background use.
 
+**Update 2026-10-05, partly contradicted by real use.** In the live
+`hook.log` (§8), the session line was the first hot bucket in 335 of 470
+brakes, and `week:Fable` in 127. "Tuning session margins is close to
+pointless" does not hold for these folders. One caveat: `solidstate` runs
+`m1=0.5` and enforces only `session` and `week`, which tilts the count
+towards `session`. `niceclaude burn` has not been re-run over the longer
+history yet; that is the remaining step.
+
 ---
 
 ## 4. ~~Multi-hour freezes~~ — RESOLVED
@@ -91,6 +104,12 @@ as is `fanout_reserve` and `chunk`.
 The burn-rate asymmetry in §3 suggests effort should go into the weekly margins;
 the session ones barely affect behaviour.
 
+**Update 2026-10-05:** §8 now has real brakes, and the session line produced
+most of them (335 of 470), so the session margins do affect behaviour. The
+folders in use tune their own margins (`solidstate`: `m0=20`, `m1=0.5`), and
+none has run the defaults long enough to judge 5 and 8 themselves. The
+defaults remain unvalidated.
+
 ---
 
 ## 6. Not yet built
@@ -99,13 +118,14 @@ Done since first draft: plotting (`niceclaude plot`), burn-rate analysis
 (`niceclaude burn`), daemon supervision (`deploy/`), the fan-out gate
 (`--fanout-reserve`), and the pidfile/`stop` lifecycle.
 
+Since done as well (checked 2026-10-05): `plot.py` has tests
+(`tests/test_plot.py`), CI runs the suite on push
+(`.github/workflows/tests.yml`), and the repo has a git remote and a
+`LICENSE`. A PyPI publishing workflow exists (`publish.yml`, `RELEASING.md`).
+Whether a release has been made is not recorded here.
+
 Still missing:
 
-- **`plot.py` has no test coverage.** The other three modules are covered.
-- **No CI.** Running the 52 tests on push is cheap and catches exactly the drift
-  that bites shared tooling.
-- **No git remote, no LICENSE, not on PyPI.** Distribution is unsolved;
-  open-sourcing is pending an employer decision.
 - `UserPromptSubmit` and `Stop` hooks remain unused. Genuinely optional.
 
 ---
@@ -119,7 +139,37 @@ genuinely unattended multi-day runs.
 
 ---
 
-## 8. The pace line has never braked anything in anger
+## 8. ~~The pace line has never braked anything in anger~~ — RESOLVED by real use
+
+**Resolved 2026-10-05, from the live `hook.log`** (2026-08-17 to 2026-10-05,
+Windows, default account). It is now real use, not forced policies. Paced
+folders: this repo, `solidstate` and `solidstate2`, each with its own margins
+and band.
+
+| Hold ended by | Count | Median | p90 | Max | Total |
+|---|---|---|---|---|---|
+| `band-release` (one band_delay) | 2,102 | 120 s | 240 s | 253 s | 89 h |
+| `line-caught-up` | 248 | 37 min | 2.2 h | 44 h | 391 h |
+| `max_delay-release` | 211 | 240 s | 240 s | 246 s | 12 h |
+| `unpaced` (kill switch or policy edit) | 10 | 11 min | 48 h | 48 h | 97 h |
+
+- 2,604 holds started: 470 `brake` lines (8 of them escalations from a
+  throttle) and 2,170 `throttle`. Only 4 lines mention `BLIND`.
+- 2,572 releases leave about 32 holds (1.2%) with no `release`. The log
+  cannot say whether the harness killed them at the hook timeout, the
+  session was closed while frozen, or they are still running.
+- First token of each `brake` reason, i.e. the first hot bucket: `session`
+  335, `week:Fable` 127, `week:all models` 3, and 5 others (blind or no
+  buckets). In this use the 5-hour line did most of the braking. See §3.
+- Nearly all of this is from September onwards: 5 holds in August, 2,283
+  in September, 352 so far in October.
+
+So the line governs real work, and holds end by every route the design
+provides. What this does not show is §8's other question: whether a paced
+agent's work stays *useful* across its holds. Nothing here measures that,
+and §7 is the part of it that is unexamined.
+
+The original entry follows.
 
 **The most important caveat in this file.** Every brake ever observed was forced
 with an artificial policy (`m0=0, m1=99`) to make the line unreachable.
@@ -326,7 +376,12 @@ filing, the declared form was not fixed.
 
 ---
 
-## 13. Sighting: stale test counts and "not yet built" items in the docs
+## 13. ~~Sighting: stale test counts and "not yet built" items in the docs~~ — FIXED
+
+**Fixed 2026-10-05.** As suggested below, the test counts were removed from
+`README.md` *Tests* and `test-matrix.md`, not updated, so they cannot drift
+again. §6 now records what has been built since, and §1 is marked resolved.
+The original entry follows.
 
 Filed 2026-10-05, seen while writing model detection's Phase 2 paperwork.
 Not fixed, since it is unrelated to that work. The suite now has 735 tests,

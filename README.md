@@ -709,7 +709,7 @@ directory `niceclaude paths data_dir` names, as for an upgrade.
 uv run --with pytest pytest tests/ -q
 ```
 
-388 tests, no network, no tokens, a few seconds. `tests/smoke_installed.py`
+No network, no tokens, a few seconds. `tests/smoke_installed.py`
 additionally exercises the installed entry points — run it after
 `uv tool install .`
 
