@@ -446,22 +446,24 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         or (k == "week:all models" and "week" in enforce)
         or ("model" in enforce and model_matches(k, model))
     ]
-    if (not enforced and declared == DETECT and buckets
-            and enforce == {"model"}):
-        # Under `detect`, a caller with no per-model bucket -- an Opus call, an
-        # unknown model, a SubagentStart -- is bound by nothing when `model` is
-        # the only window enforced. That is "nothing applies", not "cannot
-        # see": the snapshot is there and was read. Falling through would
-        # brake it blind, uncapped by default, and freeze the organizer until
-        # the harness timeout. An empty snapshot still goes blind below, and
-        # so does one missing an enforced session or week bucket (the cp1252
-        # misparse in sample_once leaves only week:Fable): that is "cannot
-        # see", exactly as under a declared model.
-        # A missing per-model row is ignored, whoever the caller is. The
-        # renderer drops a row whose utilization is null, so a Fable caller
+    if not enforced and buckets and enforce == {"model"}:
+        # With `model` the only window enforced, a call that matches no
+        # per-model row is bound by nothing: "nothing applies", not "cannot
+        # see", since the snapshot is there and was read. That covers a model
+        # with no bucket at all (declared `opus`; no week:Opus exists), an
+        # undeclared model, and under `detect` an Opus call, an unknown model
+        # or a SubagentStart. Falling through would brake it blind, uncapped
+        # by default, until the harness timeout (open-questions 12).
+        #
+        # A missing per-model row is ignored even for a model that has one.
+        # The renderer drops a row whose utilization is null, so a Fable call
         # with no week:Fable row may have one that is merely unrendered; it
         # runs free rather than freezing. The user chose that over a list of
         # which families have buckets (model-detection-plan.md, D9).
+        #
+        # An empty snapshot still goes blind below, and so does one missing
+        # an enforced session or week bucket (the cp1252 misparse in
+        # sample_once leaves only week:Fable): that is "cannot see".
         return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
                 "region": "free", "blind": False}

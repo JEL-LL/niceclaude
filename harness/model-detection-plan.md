@@ -104,7 +104,9 @@ agent too, so once that bucket is spent every call lags, Opus included.
   - a list of the families that have buckets (fails safe, but needs upkeep);
   - a blind hold, as for a declared model (it freezes the organizer).
   An enforced `session` or `week` bucket that is missing still means
-  "cannot see", and brakes blind as before.
+  "cannot see", and brakes blind as before. After Phase 2 the user had the
+  same rule applied to declared models, which fixes `open-questions.md` §12:
+  the early return in `decide` no longer tests for `detect`.
 
 ## 4. Phase 0 results — measured, no code
 

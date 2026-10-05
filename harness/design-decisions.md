@@ -761,7 +761,7 @@ machinery beyond that.
   first tool call, which sees its own record in every Phase 0 run, is held on
   it. `--fanout-reserve` therefore does not reach `week:Fable` under
   `detect`.
-- **D9. Under `detect`, a missing per-model bucket is ignored** (the user's
+- **D9. A missing per-model bucket is ignored** (the user's
   call, made in Phase 1 review). When `model` is the only window enforced and
   the caller matches no row, `decide` returns `region: "free"` rather than
   the hard blind brake. That covers an Opus call, an unread model and a
@@ -784,9 +784,13 @@ machinery beyond that.
   The early return is narrow on purpose. An empty snapshot still brakes
   blind, and so does one missing an enforced `session` or `week` bucket
   (the cp1252 misparse once left only `week:Fable`): that is "cannot see",
-  not "nothing applies", and §11 and §17 still govern it. The declared form
-  of the same case (`{"model": "opus", "enforce": ["model"]}`) is unchanged,
-  and filed as `open-questions.md` §12.
+  not "nothing applies", and §11 and §17 still govern it.
+
+  The rule does not depend on `detect`. It was first built for `detect`
+  only, then extended to declared models at the user's request ("fix §12 the
+  same way"). So `{"model": "opus", "enforce": ["model"]}`, which names a
+  model with no bucket, runs free too, where it used to brake blind on every
+  call (`open-questions.md` §12).
 
 Detection is lazy and cheap. `wants_detection` gates it to a paced `detect`
 rule that enforces `model`, after `paced_entry`, so an unpaced folder never

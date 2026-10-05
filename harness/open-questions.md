@@ -303,9 +303,16 @@ pid would also be enough for a later run to clean up.
 
 ---
 
-## 12. Sighting: a declared model with no bucket, enforcing only `model`, brakes blind forever
+## 12. ~~Sighting: a declared model with no bucket, enforcing only `model`, brakes blind forever~~ — FIXED
 
-Filed 2026-10-05, found in the Phase 1 review of model detection. Not fixed.
+**Fixed 2026-10-05**, at the user's request, the same way as D9 in
+`model-detection-plan.md`. With `model` the only window enforced, `decide`
+now lets a call that matches no per-model row run free, under any declared
+model, and not only under `detect`. Tests:
+`test_declared_enforcing_only_model_*` in `tests/test_model_detection.py`.
+The original entry follows.
+
+Filed 2026-10-05, found in the Phase 1 review of model detection.
 It predates `detect` and does not depend on it.
 
 A rule such as `{"model": "opus", "enforce": ["model"]}` names a model that
@@ -314,9 +321,8 @@ then empty, so every call takes the hard "no usable buckets in snapshot"
 blind brake. Under the default `max_delay` (none) that hold is uncapped and
 runs to the harness timeout. The `detect` form of the same case is fixed in
 `decide`. Under `detect` with only `model` enforced, a caller with no
-matching row runs free (`model-detection-plan.md` D9). The declared form is
-not fixed. The user's stated preference in D9, "just ignoring a missing
-bucket", suggests fixing it the same way.
+matching row runs free (`model-detection-plan.md` D9). At the time of
+filing, the declared form was not fixed.
 
 ---
 

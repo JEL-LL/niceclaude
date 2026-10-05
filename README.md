@@ -758,14 +758,14 @@ open a transcript. Three things to know about it:
   whose model cannot be read has no per-model line for that call; `session`
   and `week` still apply as usual. A subagent never borrows its parent's model,
   since that is exactly the wrong answer in the case this exists for.
-- **With only `--enforce model`, no matching row means run free.** Under
-  `detect`, a call that matches no per-model row (an Opus call, an unread
-  model, a `SubagentStart`) is bound by nothing at all, so it runs rather than
-  braking blind. That includes a Fable call when the snapshot has no
-  `week:Fable` row, which happens when `/usage` leaves the row out. Under a
-  declared model nothing changed. With `session` or `week` enforced as well, a
-  missing row for one of those still brakes blind, as before, because that is
-  "cannot see" rather than "nothing applies".
+- **With only `--enforce model`, no matching row means run free.** A call
+  that matches no per-model row is bound by nothing at all, so it runs rather
+  than braking blind. Under `detect` that is an Opus call, an unread model or
+  a `SubagentStart`; under a declared model it is one with no bucket, such as
+  `opus`. It includes a Fable call when the snapshot has no `week:Fable` row,
+  which happens when `/usage` leaves the row out. With `session` or `week`
+  enforced as well, a missing row for one of those still brakes blind,
+  because that is "cannot see" rather than "nothing applies".
 
 `status` has no caller to read a model from, so under `detect` it marks a
 per-model row `per call` rather than `ENFORCED` or `ignored`, and notes that

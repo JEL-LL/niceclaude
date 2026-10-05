@@ -109,7 +109,8 @@ signs of a daemon that was missed.
   line and its first tool call is held instead. A session's very first call
   may find no assistant record yet, and then has no per-model line for that
   call. And with only `--enforce model`, a call that matches no per-model row
-  runs free rather than braking blind.
+  runs free rather than braking blind, as it now does under a declared model
+  too (see *Fixed*).
 
   `hook.log` `brake` and `throttle` lines now end with
   `model=<family>(detected|declared)` or `model=none`, after the reason, so
@@ -282,6 +283,16 @@ signs of a daemon that was missed.
   `defaults`.
 
 ### Fixed
+
+- **A rule that enforces only `model`, and whose model has no bucket, no
+  longer freezes every call.** `{"model": "opus", "enforce": ["model"]}`
+  names a model with no per-model bucket, so nothing was enforced and every
+  call took the uncapped "no usable buckets in snapshot" blind brake, running
+  to the hook's timeout. Now, with `model` the only window enforced, a call
+  that matches no per-model row runs free, as it does under `--model detect`.
+  That also covers an undeclared model, and a declared `fable` whose
+  `week:Fable` row is missing from the snapshot. An empty snapshot, or one
+  missing an enforced `session` or `week` bucket, still brakes blind.
 
 - **On Windows, publishing a snapshot no longer fails while a hook is reading
   it.** Windows refuses to rename onto a file another process has open, so a

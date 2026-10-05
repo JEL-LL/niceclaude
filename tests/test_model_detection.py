@@ -424,6 +424,38 @@ def test_detect_ignores_a_missing_per_model_row(caller, degraded):
         assert d["braked"] == (caller == "sonnet" and bool(extra))
 
 
+@pytest.mark.parametrize("declared", ["opus", None, "fable"])
+@pytest.mark.parametrize("degraded", [False, True])
+def test_declared_enforcing_only_model_ignores_a_missing_row(declared,
+                                                            degraded):
+    """open-questions 12, fixed as D9: a declared model with no row -- opus,
+    which has no bucket at all, no model, or fable with its row unrendered --
+    runs free under `--enforce model` instead of braking blind forever."""
+    pol = rules(W, declared, enforce=["model"])
+    st = snapshot()
+    del st["buckets"]["week:Fable"]
+    assert not hook.decide(pol, st, W, NOW, degraded=degraded)["braked"]
+
+
+@pytest.mark.parametrize("degraded", [False, True])
+def test_declared_enforcing_only_model_still_holds_on_its_row(degraded):
+    pol = rules(W, "fable", enforce=["model"])
+    d = hook.decide(pol, snapshot(), W, NOW, degraded=degraded)
+    assert d["braked"] and "week:Fable" in d["reason"]
+    empty = {"ts_epoch": NOW, "buckets": {}}
+    d = hook.decide(pol, empty, W, NOW, degraded=degraded)
+    assert d["braked"] and d["blind"]
+
+
+@pytest.mark.parametrize("degraded", [False, True])
+def test_declared_with_session_and_week_missing_still_brakes_blind(degraded):
+    """Only `model` enforced makes "no row" mean "nothing applies". With
+    session and week enforced and missing, an opus rule cannot see."""
+    st = {"ts_epoch": NOW, "buckets": {"week:Fable": bucket(10, WEEK_WINDOW)}}
+    d = hook.decide(rules(W, "opus"), st, W, NOW, degraded=degraded)
+    assert d["braked"] and d["blind"]
+
+
 # --- run: lazy, once, and end to end -----------------------------------------
 
 class Stop(BaseException):
