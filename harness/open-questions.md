@@ -228,7 +228,19 @@ it could be the same dir but not the same login.
 
 ---
 
-## 11. Sighting: `write_atomic` leaks `state.json.tmp.<pid>` on Windows
+## 11. ~~Sighting: `write_atomic` leaks `state.json.tmp.<pid>` on Windows~~ — FIXED
+
+Fixed 2026-10-05. The cause was confirmed by reproduction: with a reader
+holding `state.json` open in another process, `os.replace` raises
+`PermissionError [WinError 5]`. The fix is in `cli.write_atomic`: `_replace`
+retries for up to `REPLACE_RETRY_SECONDS`, a failed write removes its temp
+file, and `publish_state` calls `_sweep_stale_tmps`, which removes
+`state.json.tmp.<digits>` files older than `STALE_TMP_SECONDS` (10 minutes).
+It goes by age rather than pid liveness, because a shared data dir can hold
+another container's or host's pids, and it runs for state.json only, never in
+Claude's settings dir. In
+addition, `_watch_loop` survives a failed publish. Tests are in
+`tests/test_write_atomic.py`. The original sighting follows.
 
 Filed 2026-10-03. Not fixed, and not part of issue #1.
 

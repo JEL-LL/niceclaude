@@ -314,14 +314,84 @@ def sample_once():
 
 # --- io ----------------------------------------------------------------------
 
+# How long write_atomic keeps retrying a replace Windows refuses. A hook holds
+# state.json open only for the length of one read, so this is ample; it is a
+# bound on a genuinely stuck file, not the expected wait.
+REPLACE_RETRY_SECONDS = 1.0
+REPLACE_RETRY_STEP = 0.02
+
+
+def _replace(tmp, path):
+    """os.replace, retried while Windows refuses it.
+
+    On Windows a rename onto a file that any process has open fails with
+    PermissionError (WinError 5), and a hook reading state.json is exactly
+    such a process, so a publish now and then lands in that window. POSIX
+    never refuses for that reason; there a PermissionError is real, and costs
+    only the bounded wait before it is raised.
+    """
+    deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(REPLACE_RETRY_STEP)
+
+
+# A temp file this old is abandoned: a write takes well under the replace
+# retry window. Age, not pid liveness, decides, because a data dir can be
+# shared across containers or hosts whose pids mean nothing here.
+STALE_TMP_SECONDS = 600
+
+
+def _sweep_stale_tmps(path):
+    """Remove `<path>.tmp.<digits>` files older than STALE_TMP_SECONDS.
+
+    Left by any write that failed before write_atomic cleaned up after itself
+    -- every release before it did, on Windows about once an hour. Best
+    effort: nothing here may turn a write that succeeded into an error.
+    Called for state.json only, the one file seen leaking, so it never runs
+    in a directory niceclaude does not own, such as Claude's settings dir.
+    """
+    try:
+        d, prefix = os.path.split(path)
+        prefix += ".tmp."
+        cutoff = time.time() - STALE_TMP_SECONDS
+        for name in os.listdir(d):
+            suffix = name[len(prefix):]
+            if not (name.startswith(prefix) and suffix.isascii()
+                    and suffix.isdigit()):
+                continue
+            full = os.path.join(d, name)
+            try:
+                if os.stat(full).st_mtime < cutoff:
+                    os.remove(full)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def write_atomic(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)  # atomic: the hook never sees a half-written file
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _replace(tmp, path)  # atomic: the hook never sees a half-written file
+    except BaseException:
+        # Never leave the temp file behind: a failed write is the caller's to
+        # report, and the stray file is otherwise permanent.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_log(record):
@@ -359,6 +429,7 @@ def publish_state(rec):
             for k, b in rec["buckets"].items()
         },
     }, indent=2))
+    _sweep_stale_tmps(STATE_PATH)
 
 
 def load_policy():
@@ -1631,7 +1702,13 @@ def _watch_loop(interval):
         rec = sample_once()
         append_log(rec)
         if rec["exit_code"] == 0 and rec["buckets"]:
-            publish_state(rec)
+            try:
+                publish_state(rec)
+            except OSError as exc:
+                # One unpublished snapshot is a stale one, which the hook
+                # already handles; a daemon dead from it is a stale snapshot
+                # forever. The sample is in the log either way.
+                print(f"{rec['ts']} publish failed: {exc}", file=sys.stderr)
         else:
             # Leave the old snapshot alone and let it age out. The hook treats a
             # stale snapshot as unknown and refreshes synchronously rather than

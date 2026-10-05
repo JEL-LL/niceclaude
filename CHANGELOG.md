@@ -261,6 +261,16 @@ signs of a daemon that was missed.
 
 ### Fixed
 
+- **On Windows, publishing a snapshot no longer fails while a hook is reading
+  it.** Windows refuses to rename onto a file another process has open, so a
+  refresh that landed during a hook's read raised, left a
+  `state.json.tmp.<pid>` file behind for good, and published nothing: the hook
+  kept pacing on an older snapshot. It happened about once an hour. The
+  replace is now retried for up to a second, a failed write always removes
+  its temp file, and each snapshot publish sweeps away any `state.json.tmp.*`
+  more than ten minutes old, which clears those left by earlier versions.
+  A `watch` daemon that still cannot publish says so and keeps polling,
+  rather than dying.
 - **The registered hook timeout was leaking budget, every six hours, silently.**
   `install` registered the hook at `timeout: 21600`. That is the real ceiling on
   any hold: when it expires the harness cancels the hook, and for `PreToolUse`
