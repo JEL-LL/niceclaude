@@ -367,6 +367,9 @@ possible failure for a budget guard. `model_matches()` splits the label into
 words instead, which handles both known forms and any future display name
 containing the model's name. See `platform-findings.md` §4.
 
+Still true of the payload, but no longer the only way: §20 lets a folder
+declare `detect` and read the model per call from the caller's transcript.
+
 ---
 
 ## 11. Fail-safe direction
@@ -709,3 +712,87 @@ Two consequences shape the commands:
   hung `claude` would stall every account, and it would poll accounts whose
   credentials had expired. `deploy/` has a templated systemd unit and a
   `-ConfigDir` for the Windows task instead.
+
+---
+
+## 20. `--model detect`: pace each call on its caller's own model
+
+§10's one declared model is wrong for a session that runs on one model and
+spawns subagents on another. Declared `opus`, an organizer's Fable subagents
+never answer to `week:Fable`. Declared `fable`, the organizer answers to it
+too, and once that bucket is spent every call lags, Opus included. No payload
+carries the model, but every caller has a transcript, and the `message.model`
+of its newest assistant record says which model wrote it. `detect_model`
+ports the user's proof of concept (`open-questions.md` §9) to pure Python;
+`model_family` maps the id onto the word `model_matches` compares
+(`claude-fable-5-1` gives `fable`). The full plan, the Phase 0 measurements
+and the smaller decisions (D3–D8) are in `model-detection-plan.md`, under the
+labels used here and in the code.
+
+The only per-model bucket ever recorded is `week:Fable`, so in practice this
+decides one thing per call: pace on the Fable line or not. Nothing here grows
+machinery beyond that.
+
+- **D1. `detect` is a value of `--model`, not a precedence rule.** A declared
+  model behaves exactly as before, and `decide` ignores `caller_model` under
+  it. `--model detect`, stored as `"model": "detect"` (`DETECT`, matched
+  case-insensitively), makes `decide` use the family `run` detected instead.
+  With no `--model`, no per-model bucket is enforced, as before. When
+  detection finds nothing, the call has no per-model bucket, and `session`
+  and `week` still apply.
+
+  Rejected: a precedence rule, with the detected model winning and the
+  declared one as the fallback (the likely answer `open-questions.md` §9
+  recorded before the user chose `detect`, as Q1 in the plan). The user chose
+  `detect` as one more value of `--model` (plan D1). It is the simpler form:
+  there is no precedence to resolve. Two things follow from that: a declared
+  folder never opens a transcript, and an undetected call is never paced on a
+  declared model that, in a mixed session, would be the wrong one.
+- **D2. `SubagentStart` does not detect.** The subagent's transcript does not
+  exist yet when it fires (`platform-findings.md` §16, every run).
+  `detect_model` returns None for it before looking, skipping both the
+  derived path and the search. The search would fail on every fan-out and
+  walk the whole project directory each time: 17 ms over 9,750 files warm,
+  and one project dir here holds 22,541. Here the port departs from the proof
+  of concept, which searches and prints `unknown`. It also skips
+  `<synthetic>` records, skips a torn last line that would abort the proof
+  of concept's `jq`, and stops at 8 MiB (plan D4, §2 and D6).
+  The cost is bounded: a Fable subagent launches past the Fable line, and its
+  first tool call, which sees its own record in every Phase 0 run, is held on
+  it. `--fanout-reserve` therefore does not reach `week:Fable` under
+  `detect`.
+- **D9. Under `detect`, a missing per-model bucket is ignored** (the user's
+  call, made in Phase 1 review). When `model` is the only window enforced and
+  the caller matches no row, `decide` returns `region: "free"` rather than
+  the hard blind brake. That covers an Opus call, an unread model and a
+  `SubagentStart` alike. In the user's words: "If you are just supposed to
+  hold on Fable and you don't have Fable information, you don't just stop
+  and catch fire, you just run free." Without it, every such call in an
+  `--enforce model` folder took "no usable buckets in snapshot", uncapped
+  under the default `max_delay`, and froze the organizer until the harness
+  timeout. The case it lets through: a Fable call whose `week:Fable` row is
+  missing, because the renderer drops a row whose utilization is null, runs
+  unpaced. The row was present in 35,330 of 35,330 samples.
+
+  Rejected:
+  - *a list of the families that have buckets*, so that only a known Fable
+    caller with no row would brake. It fails safe, but it needs upkeep every
+    time a per-model bucket appears;
+  - *a blind hold, as under a declared model.* It freezes the organizer, for
+    hours, on a bucket it never draws on.
+
+  The early return is narrow on purpose. An empty snapshot still brakes
+  blind, and so does one missing an enforced `session` or `week` bucket
+  (the cp1252 misparse once left only `week:Fable`): that is "cannot see",
+  not "nothing applies", and §11 and §17 still govern it. The declared form
+  of the same case (`{"model": "opus", "enforce": ["model"]}`) is unchanged,
+  and filed as `open-questions.md` §12.
+
+Detection is lazy and cheap. `wants_detection` gates it to a paced `detect`
+rule that enforces `model`, after `paced_entry`, so an unpaced folder never
+opens a transcript. `run` tries it at most once per invocation, because a
+frozen agent cannot change model while frozen. The backwards read
+(`_last_model`) gives up after `DETECT_CAP` (8 MiB) and returns None, and
+`detect_model` never raises: an exception would fail the hook open.
+`model_tag` adds `model=<family>(detected|declared)` or `model=none` to
+`brake` and `throttle` lines in `hook.log`, so a hold can be explained.

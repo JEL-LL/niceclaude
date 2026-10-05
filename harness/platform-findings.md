@@ -583,13 +583,14 @@ Refuted above:
 ## 16. What a hook can see of the caller's model (model detection, Phase 0)
 
 Observed on Claude Code **2.1.287**, Windows 10, default account. This is
-Phase 0 of `model-detection-plan.md`. A probe hook registered for
+Phase 0 of `model-detection-plan.md`. A probe hook
+(`harness/probes/model_probe.py`, kept for re-runs) registered for
 `PreToolUse` and `SubagentStart` through `claude --settings probe.json -p ...`
 ran from an unpaced scratch dir. Per event it logged payload key *names*, the
 event, `tool_name`, `agent_id` and `agent_type`. For the main transcript, and
 for a subagent's derived
 `<dirname(transcript_path)>/<session_id>/subagents/agent-<agent_id>.jsonl`, it
-logged: exists, size, assistant-record count, distinct `message.model` values,
+logged: the last three components of its path, exists, size, assistant-record count, distinct `message.model` values,
 the last one read backwards, and that read's time. It logged no tool input and
 no message content.
 

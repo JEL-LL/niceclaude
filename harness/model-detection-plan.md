@@ -5,11 +5,13 @@ whoever made it, rather than on one declared model. The approach is the user's p
 `open-questions.md` §9 (`resolve-model.sh`), ported to pure Python. It is not
 re-evaluated here. Symbols are cited by name, not line number.
 
-**Status: Phase 0 done. Q1 settled (`--model detect`, D1). Phase 1 built
-(`detect_model`, `model_family` and the wiring in `hook.py`, D8's wording in
-`cli.py`, `tests/test_model_detection.py`), reviewed through four same-model rounds and a Fable gate (D9 settled
-the last open behaviour);
-Phase 2's paperwork is still to do.**
+**Status: done. Phase 0 measured. Q1 settled (`--model detect`, D1). Phase 1
+built in 1711dfd (`detect_model`, `model_family` and the wiring in `hook.py`,
+D8's wording in `cli.py`, `tests/test_model_detection.py`), reviewed through
+four same-model rounds and a Fable gate (D9 settled the last open behaviour).
+Phase 2 done: README *Declaring the model*, `design-decisions.md` §20,
+`open-questions.md` §9 marked resolved, `CHANGELOG.md`, and `test-matrix.md`
+cases 11–12.**
 
 **Scale check.** The only per-model bucket that exists is `week:Fable`, so in
 practice this decides one thing per call: pace on the Fable line or not. It
@@ -61,11 +63,13 @@ agent too, so once that bucket is spent every call lags, Opus included.
   exist yet (Phase 0, all three runs). Under `detect` it gets no per-model
   bucket, and the hook skips the file check and the search. The search would
   run on every fan-out, always fail, and walk the whole project dir: 17 ms
-  over 9,750 files warm, and one project dir here has 22,541. This is the one
-  place the port departs from the PoC, which would search and then print
-  `unknown`. The consequence is bounded: a Fable subagent launches past the
-  Fable line, and its **first tool call** is held on it (Phase 0: that call
-  sees its own record in every run).
+  over 9,750 files warm, and one project dir here has 22,541. Here the port
+  departs from the PoC, which would search and then print `unknown`. It
+  also departs in D4 and D6, and in skipping a torn last line, which aborts
+  the PoC's `jq` and leaves it printing `unknown`. The consequence is
+  bounded: a Fable subagent launches past the Fable line, and its **first
+  tool call** is held on it (Phase 0: that call sees its own record in every
+  run).
 - **D3 — a subagent never borrows its parent's model.** The parent's model is
   exactly the wrong answer in the Opus-with-Fable-subagents case. A subagent
   whose own transcript has no assistant record yet gets no per-model bucket
@@ -104,7 +108,7 @@ agent too, so once that bucket is spent every call lags, Opus included.
 
 ## 4. Phase 0 results — measured, no code
 
-Probe: `<scratch>/probe9/probe.py`, registered for `PreToolUse` and
+Probe: `harness/probes/model_probe.py`, registered for `PreToolUse` and
 `SubagentStart` through `claude --settings probe.json -p …`, run from the
 unpaced scratch dir on Claude Code 2.1.287. Per event it logged payload key
 *names*, the event, `tool_name`, `agent_id` and `agent_type`. For each

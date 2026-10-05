@@ -248,7 +248,9 @@ niceclaude on ~/projects/alpha --model opus --enforce session
 `--enforce` takes any combination of `session`, `week` and `model` (the
 per-model weekly bucket). The default is all three. `niceclaude status` prints
 which windows a folder answers to and marks the rest `ignored`, so it never
-lies about what is actually being enforced.
+lies about what is actually being enforced. (Under `--model detect`, with
+`model` enforced, a per-model row reads `per call`; see
+[Declaring the model](#declaring-the-model).)
 
 This is what makes pacing useful in the *foreground*: several projects worked
 round-robin can each be smoothed across their 5-hour block without any of them
@@ -713,10 +715,70 @@ additionally exercises the installed entry points — run it after
 
 ## Declaring the model
 
-Hooks receive `cwd`, `session_id`, `tool_name`, and `agent_type`, but **not the
-model**. So `--model` has to be declared. It decides whether the per-model
-weekly bucket is enforced: Fable draws on both its own weekly budget and the
-shared one, while Opus and Sonnet have no per-model bucket at all.
+Hooks receive `cwd`, `session_id`, `transcript_path`, `tool_name`, and, inside
+a subagent, `agent_id` and `agent_type`, but **not the model**. `--model`
+decides whether the per-model weekly bucket is enforced: Fable draws on both
+its own weekly budget and the shared one, while Opus and Sonnet have no
+per-model bucket at all. Today the only per-model bucket is `week:Fable`, so in
+practice the choice is whether a call answers to the Fable line or not.
+
+There are two ways to say which model that is.
+
+**Declare it.** `--model opus` (or `fable`, `sonnet`, ...) paces every call in
+the folder as that model, main agent and subagents alike. That is how it always
+worked, and it still works exactly that way. A folder with no `--model`
+enforces no per-model bucket.
+
+**Or detect it, per call.** `--model detect` reads the model from the
+transcript of whoever made the call: the main agent's `transcript_path`, or a
+subagent's own transcript when `agent_id` is set. The model is the
+`message.model` of the newest assistant record, read backwards from the end of
+the file, so the hook reads only as much of the tail as it takes to find one,
+and never more than 8 MiB. The case a single declared model gets wrong is an
+Opus organizer with Fable subagents. Declared
+`opus`, the Fable subagents never answer to `week:Fable`. Declared `fable`, the
+organizer does too, and once that bucket is spent every call lags, Opus
+included. Under `detect` the Fable subagents' calls answer to `week:Fable` and
+the organizer's do not.
+
+```bash
+niceclaude on ~/projects/nightly --model detect
+```
+
+Detection runs only in a paced folder whose rule enforces the `model` window,
+once per hook call, so unpaced folders and `--enforce session` folders never
+open a transcript. Three things to know about it:
+
+- **`SubagentStart` is not detected.** The subagent's transcript does not exist
+  yet when it fires, so under `detect` a fan-out has no per-model line, and a
+  Fable subagent launches past the Fable line. Its **first tool call** is held
+  instead: by then its transcript holds its own first assistant record.
+- **A session's first call may not be detected.** The main agent's first tool
+  call can race the transcript write and find no assistant record yet. A call
+  whose model cannot be read has no per-model line for that call; `session`
+  and `week` still apply as usual. A subagent never borrows its parent's model,
+  since that is exactly the wrong answer in the case this exists for.
+- **With only `--enforce model`, no matching row means run free.** Under
+  `detect`, a call that matches no per-model row (an Opus call, an unread
+  model, a `SubagentStart`) is bound by nothing at all, so it runs rather than
+  braking blind. That includes a Fable call when the snapshot has no
+  `week:Fable` row, which happens when `/usage` leaves the row out. Under a
+  declared model nothing changed. With `session` or `week` enforced as well, a
+  missing row for one of those still brakes blind, as before, because that is
+  "cannot see" rather than "nothing applies".
+
+`status` has no caller to read a model from, so under `detect` it marks a
+per-model row `per call` rather than `ENFORCED` or `ignored`, and notes that
+its verdict line is for a caller with no per-model bucket.
+
+`hook.log` records which per-model bucket a hold could have answered to. Each
+`brake` and `throttle` line ends with `model=fable(detected)`,
+`model=opus(declared)`, or `model=none` when the rule declares no model, does
+not enforce the `model` window, or the caller's model could not be read:
+
+```
+2026-10-05T18:02:11Z brake   cwd=/home/me/projects/nightly [PreToolUse] week:Fable 94% over line 61.2% model=fable(detected)
+```
 
 ## Verifying the parser
 

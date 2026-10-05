@@ -156,7 +156,7 @@ def paced_entry(policy, cwd):
 # `detect` is paced on that, call by call, so an Opus organizer and its Fable
 # subagents each answer to their own per-model bucket. A port of the bash
 # proof of concept in open-questions.md section 9; model-detection-plan.md
-# holds the decisions cited as D1-D8 below.
+# holds the decisions cited as D1-D9 below.
 
 # The stored value of `--model` that asks for detection. Matched
 # case-insensitively, like every other declared model.

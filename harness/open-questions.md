@@ -149,7 +149,19 @@ mechanically sound and behaviourally unproven.
 
 ---
 
-## 9. Detect the model per call, not per folder (idea, not scheduled)
+## 9. ~~Detect the model per call, not per folder~~ — RESOLVED
+
+Built 2026-10-05 in 1711dfd as `--model detect`, to the plan in
+`model-detection-plan.md`; the decisions are `design-decisions.md` §20. The
+hook reads each caller's model from its own transcript (`detect_model`,
+`model_family` in `hook.py`), so an Opus organizer and its Fable subagents
+answer to different lines. The open points below were settled there: no
+precedence rule, since `detect` is a value of `--model` (D1); `SubagentStart`
+is not detected, and the subagent's first tool call is (D2); ids map to
+families through `model_family`; the read is bounded at 8 MiB (D6); and
+`hook.log` carries a `model=` tag (D7). Tests are in
+`tests/test_model_detection.py`. The original entry, and the proof of concept,
+follow.
 
 Filed 2026-10-02 at the user's request, to be built later; it is not part of
 issue #1.
@@ -305,3 +317,15 @@ runs to the harness timeout. The `detect` form of the same case is fixed in
 matching row runs free (`model-detection-plan.md` D9). The declared form is
 not fixed. The user's stated preference in D9, "just ignoring a missing
 bucket", suggests fixing it the same way.
+
+---
+
+## 13. Sighting: stale test counts and "not yet built" items in the docs
+
+Filed 2026-10-05, seen while writing model detection's Phase 2 paperwork.
+Not fixed, since it is unrelated to that work. The suite now has 735 tests,
+but `README.md` *Tests* says 388, `test-matrix.md` *Automated first* says 52,
+and §6 above says "Running the 52 tests". §6 also lists "No CI" and "No git
+remote, no LICENSE", while the repo now has a git remote (`origin`),
+`LICENSE`, and `.github/workflows/tests.yml`. A count that drifts this
+easily may be better left out than kept in step.

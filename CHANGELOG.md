@@ -95,6 +95,28 @@ signs of a daemon that was missed.
 
 ### Added
 
+- **`niceclaude on --model detect` paces each call on its caller's model.** A
+  declared `--model` paces the main agent and every subagent as one model, so
+  an Opus organizer with Fable subagents either let the subagents past
+  `week:Fable` (declared `opus`) or held the organizer on it too (declared
+  `fable`). Under `detect` the hook reads the model from the caller's own
+  transcript, the subagent's when the caller is one, and only Fable calls
+  answer to `week:Fable`. It is opt-in: a folder with a declared model, or
+  none, behaves exactly as before.
+
+  Three limits. `SubagentStart` is not detected, because the subagent's
+  transcript does not exist yet; a Fable subagent launches past the Fable
+  line and its first tool call is held instead. A session's very first call
+  may find no assistant record yet, and then has no per-model line for that
+  call. And with only `--enforce model`, a call that matches no per-model row
+  runs free rather than braking blind.
+
+  `hook.log` `brake` and `throttle` lines now end with
+  `model=<family>(detected|declared)` or `model=none`, after the reason, so
+  readers that match on the verb or `cwd=` see them unchanged. `status` marks
+  a per-model row `per call` under `detect`. See the README's *Declaring the
+  model* and `harness/design-decisions.md` §20.
+
 - **`status` shows accounts.** Its header names this shell's account and lists
   every account `install` has recorded (in `accounts.json` at the data root)
   or that has a directory, each with whether its hook is registered — checked

@@ -66,10 +66,26 @@ printf '{"cwd":"/tmp/tp","hook_event_name":"PreToolUse"}' | timeout 3 niceclaude
 | 8 | Fable 99%, `--model fable` | `/tmp/tp` | **brake** — matched model's bucket enforced |
 | 9 | over the line, `niceclaude global off` | `/tmp/tp` | **allow** — kill switch |
 | 10 | session `pct 0`, `resets_epoch null` | `/tmp/tp` | **allow** — freshly rolled window must not brake |
+| 11 | Fable 99%, `--model detect`, payload `transcript_path` → a file whose last line is `{"type":"assistant","message":{"model":"claude-fable-5-1"}}` | `/tmp/tp` | **brake** — detected Fable caller; `hook.log` ends `model=fable(detected)` |
+| 12 | as 11, but the model is `claude-opus-5-5` | `/tmp/tp` | **allow** — detected Opus caller has no per-model bucket |
 
 Case 3 guards component-wise prefix matching. Case 10 guards the fail-safe
 exception in `design-decisions.md` §11 — the naive version brakes hardest
 exactly when headroom is greatest.
+
+Cases 11–12 re-check `--model detect` (`design-decisions.md` §20). The
+automated cover is `tests/test_model_detection.py`: the main and subagent
+paths and the search fallback, the `SubagentStart` skip, torn, synthetic,
+split, CRLF and non-UTF-8 records, the 8 MiB cap, every id seen in the wild,
+and an Opus parent with a Fable subagent end to end through `run`. What no unit test
+can check is what Claude Code actually writes, and when. For that, re-run
+`harness/probes/model_probe.py` (the Phase 0 probe, `platform-findings.md`
+§16) after a Claude Code upgrade:
+a hook registered for `PreToolUse` and `SubagentStart` through `claude
+--settings probe.json -p ...`, from an unpaced scratch dir, logging key names
+and transcript facts only, never content. It must still show no `model` key
+in any payload, no subagent transcript at `SubagentStart`, and the
+subagent's own record at its first `PreToolUse` on the derived path.
 
 Latency should be **~20ms** for every allow case.
 
