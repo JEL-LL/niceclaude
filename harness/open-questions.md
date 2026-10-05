@@ -75,13 +75,32 @@ yields roughly 7 hours of real work. That answers "is this worth running" —
 yes — but from a 4-hour sample of one workload. Re-run after a few days of
 genuine background use.
 
-**Update 2026-10-05, partly contradicted by real use.** In the live
-`hook.log` (§8), the session line was the first hot bucket in 335 of 470
-brakes, and `week:Fable` in 127. "Tuning session margins is close to
-pointless" does not hold for these folders. One caveat: `solidstate` runs
-`m1=0.5` and enforces only `session` and `week`, which tilts the count
-towards `session`. `niceclaude burn` has not been re-run over the longer
-history yet; that is the remaining step.
+**Update 2026-10-05: re-run over the long history.** `niceclaude burn`,
+35,599 samples, 15-minute bins, median sampling interval 60 s (so the
+daemon's continuous baseline, not activity-driven):
+
+| Bucket | Average (idle incl.) | Busy p90 | Line rises | Duty cycle |
+|---|---|---|---|---|
+| `session` | 2.58 %/h | 32.0 %/h | 20.0 %/h | 62% |
+| `week:Fable` | 0.59 %/h | 12.0 %/h | 0.60 %/h | **5%** |
+| `week:all models` | 0.49 %/h | 8.0 %/h | 0.60 %/h | **7%** |
+
+- **The weekly lines are still the governors over time.** Their duty cycles
+  are 5–7%, against 62% for the session line. `week:Fable` averages
+  0.59 %/h against a line rising at 0.60 %/h, so across 1,592 hours,
+  consumption ran almost exactly on the pace line. That is what a pacer
+  holding it should produce.
+- **The session line does most of the *braking*.** In the live `hook.log`
+  (§8) it was the first hot bucket in 335 of 470 brakes, and `week:Fable`
+  in 127. Busy work runs at a p90 of 32 %/h against a line rising at
+  20 %/h, so bursts cross it often. Those holds are cheap: the line
+  catches up fast.
+- Both readings stand. "Tuning session margins is close to pointless" was
+  too strong: they decide how often work is interrupted. The weekly margins
+  decide how much work happens. One caveat on the brake count:
+  `solidstate` runs `m1=0.5` and enforces only `session` and `week`, which
+  tilts it towards `session`.
+- The run reported `corrupt JSON at log line 35049`; see §14.
 
 ---
 
@@ -390,3 +409,24 @@ and §6 above says "Running the 52 tests". §6 also lists "No CI" and "No git
 remote, no LICENSE", while the repo now has a git remote (`origin`),
 `LICENSE`, and `.github/workflows/tests.yml`. A count that drifts this
 easily may be better left out than kept in step.
+
+---
+
+## 14. Sighting: a stray fragment in `usage.jsonl`
+
+Filed 2026-10-05, seen when `niceclaude burn` reported `corrupt JSON at log
+line 35049` in the live default account's `usage.jsonl`. Not investigated,
+because finding the cause means reading the append path in the code.
+
+- Line 35049 is 8 bytes: `: true}`.
+- Line 35048, before it, is a complete record (2026-10-02T20:12:37Z, 2,549
+  bytes) that parses and ends `"parse_ok": true}`. So the fragment repeats
+  the last bytes of a record that is itself intact.
+- Line 35050 is a normal record, three minutes later.
+
+It is harmless as it stands, because `load_log` skips the line and says so.
+The likely cause is two appends to `usage.jsonl` colliding, from the daemon
+and an on-demand refresh by the hook. If so, a worse collision could tear a
+real record, not just repeat a tail. Worth checking how `append_log` writes
+(one `write` of the whole line, or several; with what open mode) and
+whether Windows append is atomic for that size.
