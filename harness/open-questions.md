@@ -412,11 +412,28 @@ easily may be better left out than kept in step.
 
 ---
 
-## 14. Sighting: a stray fragment in `usage.jsonl`
+## 14. Sighting: a stray fragment in `usage.jsonl` — CONTAINED
+
+**Contained 2026-10-05, by the user's choice: hold the invariant, do not
+lock.** Locking appends across Windows, POSIX and containers is far harder
+than the problem deserves. Instead, a bad line costs that line and nothing
+else. The hook never reads `usage.jsonl`, since it paces from the atomically
+replaced `state.json`, so pacing was never at risk. `load_log`, the one
+reader (`check`, `burn`, `plot`), had two gaps, both now closed:
+
+- A fragment splitting a multi-byte character, such as `/usage`'s middle
+  dot, raised `UnicodeDecodeError` out of the read and lost the whole log.
+  The log is now decoded with `errors="replace"`.
+- A fragment that is itself valid JSON (`true`, a number) was returned as a
+  record, and `burn` would raise on `rec["exit_code"]`. Non-objects are now
+  skipped.
+
+Pinned by `tests/test_log_corruption.py`. Seven of its eight tests fail
+against the old reader. The fragments themselves will keep appearing; that
+is accepted. The original entry follows.
 
 Filed 2026-10-05, seen when `niceclaude burn` reported `corrupt JSON at log
-line 35049` in the live default account's `usage.jsonl`. Not investigated,
-because finding the cause means reading the append path in the code.
+line 35049` in the live default account's `usage.jsonl`.
 
 - Line 35049 is 8 bytes: `: true}`.
 - Line 35048, before it, is a complete record (2026-10-02T20:12:37Z, 2,549

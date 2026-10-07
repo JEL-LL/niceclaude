@@ -516,22 +516,34 @@ def load_log():
     trusting one mis-paces, but history is permanent, and wrongly hiding it
     cannot be undone. Unstamped records predate the stamp, so this keeps a
     migrated account's history, and a pre-upgrade mix stays mixed, as it was.
+
+    A bad line costs that line and nothing else. Two appends that collide
+    can leave a fragment behind (open-questions 14), and no lock prevents
+    that; so the reader is what holds the invariant. Bytes are decoded with
+    replacement, because a fragment can split a multi-byte character, and a
+    strict decode would raise out of the loop and lose the whole log. A
+    line that parses to anything but an object is skipped too: `true` or a
+    bare number is valid JSON, and every caller indexes records as dicts.
     """
     if not os.path.exists(LOG_PATH):
         return []
     out = []
     skipped = 0
-    with open(LOG_PATH, encoding="utf-8") as fh:
+    with open(LOG_PATH, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
                 print(f"  corrupt JSON at log line {n}", file=sys.stderr)
                 continue
-            if (isinstance(rec, dict) and "config_key" in rec
+            if not isinstance(rec, dict):
+                print(f"  corrupt JSON at log line {n} (not a record)",
+                      file=sys.stderr)
+                continue
+            if ("config_key" in rec
                     and rec["config_key"] != ACCOUNT_KEY):
                 skipped += 1
                 continue

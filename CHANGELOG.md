@@ -290,6 +290,13 @@ signs of a daemon that was missed.
 
 ### Fixed
 
+- **A damaged line in `usage.jsonl` can no longer stop `check`, `burn` or
+  `plot`.** Two appends that collide can leave a fragment behind. A fragment
+  that split a multi-byte character made the whole read fail, and one that
+  happened to be valid JSON, such as `true`, could crash `burn`. Each bad
+  line is now skipped and reported, and the rest of the history is read as
+  before. Pacing was never affected: the hook does not read this log.
+
 - **A rule that enforces only `model`, and whose model has no bucket, no
   longer freezes every call.** `{"model": "opus", "enforce": ["model"]}`
   names a model with no per-model bucket, so nothing was enforced and every
