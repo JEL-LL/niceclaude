@@ -176,7 +176,9 @@ and band.
   throttle) and 2,170 `throttle`. Only 4 lines mention `BLIND`.
 - 2,572 releases leave about 32 holds (1.2%) with no `release`. The log
   cannot say whether the harness killed them at the hook timeout, the
-  session was closed while frozen, or they are still running.
+  session was closed while frozen, or they are still running. The user has
+  accepted this rather than chase it (2026-10-09): the hook's timeout is 48
+  hours, and an agent let go after a 48-hour hold does little harm.
 - First token of each `brake` reason, i.e. the first hot bucket: `session`
   335, `week:Fable` 127, `week:all models` 3, and 5 others (blind or no
   buckets). In this use the 5-hour line did most of the braking. See §3.

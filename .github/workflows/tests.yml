@@ -8,14 +8,12 @@ on:
 
 jobs:
   test:
-    # Windows matters most here. The tool is written to be cross-platform but
-    # has only ever been exercised on Linux, and the riskiest code -- path
-    # normalization for folder policy -- fails *silently* when it is wrong: a
-    # folder looks paced while being completely ungoverned. A free Windows
-    # runner closes most of harness/windows-handoff.md without needing a
-    # Windows machine. What it cannot cover is anything requiring Claude Code
-    # itself to be installed and authenticated, notably whether Claude Code
-    # invokes hooks synchronously on Windows (handoff check 4).
+    # Every OS, because the riskiest code -- path normalization for folder
+    # policy -- fails *silently* when it is wrong: a folder looks paced while
+    # being completely ungoverned. Windows was first verified by hand
+    # (harness/windows-results.md) and is now the main platform; this matrix
+    # keeps all three honest. What it cannot cover is anything that needs
+    # Claude Code itself installed and authenticated.
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -31,10 +29,11 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
+      # setup-uv publishes no major tags since v8, so it is pinned exactly.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python }}
 
@@ -59,8 +58,8 @@ jobs:
     name: plot extra
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: "3.13"
       - run: uv build
