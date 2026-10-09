@@ -156,6 +156,19 @@ changed, branches moved, the world turned. Nothing has been thought about here a
 all. Possibly out of scope; possibly the most interesting remaining problem for
 genuinely unattended multi-day runs.
 
+**Deferred by the user, 2026-10-09:** "might have value, but I am not
+interested in it currently." Do not propose it unprompted. The sketch, for
+when it is picked up:
+- §8's data says it is real. Holds released by `line-caught-up` have a
+  median of 37 min, a p90 of 2.2 h and a maximum of 44 h.
+- The cheapest form leaves holds as they are. When a hold longer than some
+  threshold (say 15 min) releases, the hook's `PreToolUse` output tells the
+  model how long it was paused, and that files, branches and processes may
+  have changed.
+- Phase 0 would check that this output actually reaches the model.
+- The open cost question is whether the re-checking it prompts spends more
+  tokens than it saves.
+
 ---
 
 ## 8. ~~The pace line has never braked anything in anger~~ — RESOLVED by real use
