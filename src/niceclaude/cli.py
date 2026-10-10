@@ -66,9 +66,9 @@ from ._shared import (  # noqa: E402
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
     DEFAULT_POLICY, HOME, HOOK_LOG_PATH, HOOK_TIMEOUT,
     LOG_PATH, POLICY_PATH, REGISTRY_PATH, ROOT_DIR, SETTINGS_PATH,
-    MAX_STALE, STALL_MARKER_PATH, STATE_PATH, WINDOW_SECONDS, account_paths, account_slug,
-    bucket_pace, model_matches, norm_path, normalize_enforce, off_or_num,
-    path_within,
+    MAX_STALE, STALL_MARKER_PATH, STATE_PATH, WINDOW_SECONDS, account_paths,
+    account_slug, blind_delay_of, bucket_pace, model_matches, norm_path,
+    normalize_enforce, off_or_num, path_within,
 )
 
 # "Current session: 11% used · resets Aug 14, 8:10pm (UTC)"
@@ -280,7 +280,8 @@ def sample_once():
         # bytes C2 B7 -- read as cp1252 those become "Â·", LINE_RE stops
         # matching, and the session and week:all-models buckets vanish from the
         # snapshot while week:Fable (which carries no separator) still parses.
-        # The hook then finds no enforceable bucket and brakes blind forever.
+        # The hook then finds no enforceable bucket and brakes blind on every
+        # call, until blind_delay lets each one through (forever, before it).
         # errors="replace" keeps a partial read surfacing as an unparsed line
         # rather than an exception that would discard the whole sample.
         proc = subprocess.run(["claude", "-p", "/usage"],
@@ -1883,7 +1884,8 @@ def _watch_loop(interval):
 
 def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
            no_max_delay=False, band=None, band_delay=None,
-           no_band_delay=False, subagent_ttl=None):
+           no_band_delay=False, subagent_ttl=None, blind_delay=None,
+           no_blind_delay=False):
     pol = load_policy()
     key = norm_path(path)
     # Checked before anything is written, so a settings file we refuse to
@@ -1938,6 +1940,13 @@ def cmd_on(path, model, m0, m1, fanout_reserve, enforce, max_delay,
         entry["band_delay"] = None
     elif band_delay is not None:
         entry["band_delay"] = band_delay
+    if no_blind_delay:
+        # An explicit null, as above, and here it is the only way to say it:
+        # blind_delay ships set, so a pop would inherit the 240s default and
+        # "hold until you can see" would quietly become "for four minutes".
+        entry["blind_delay"] = None
+    elif blind_delay is not None:
+        entry["blind_delay"] = blind_delay
 
     ttl_line = None
     ttl_notes = []
@@ -2279,7 +2288,8 @@ def human_delta(seconds):
     return f"{s}s"
 
 
-def describe_hold(p, enforced, chunk, band_hold=None):
+def describe_hold(p, enforced, chunk, band_hold=None, blind=False,
+                  blind_hold=None, now=None):
     """How long this one line would hold work, in the row's last column.
 
     An ignored bucket still gets its wait computed, but phrased as the
@@ -2294,6 +2304,16 @@ def describe_hold(p, enforced, chunk, band_hold=None):
     what the hook does, and the tighter of the two caps is what it does.
     None means no band hold is configured, and saying so is the only way a
     reader can tell the knob is unset rather than the line uncrossed.
+
+    `blind` says the hook's whole hold is blind -- every hot line wake-less --
+    so an unsolvable row does not hold until it can be solved: `blind_hold`,
+    the tighter of blind_delay and max_delay, lets the call through first, or
+    None says nothing will. Not set when another line has a real wake, since
+    then that line, not this one, says when the hold ends.
+
+    `now` lets a row whose wake has already passed -- the window reset since
+    the reading -- read as unsolvable too, which is how the hook treats it,
+    rather than as "HOLDS 0s" for a hold that re-checks on the chunk.
     """
     if p["region"] == "band":
         if band_hold is None:
@@ -2302,11 +2322,17 @@ def describe_hold(p, enforced, chunk, band_hold=None):
                 f"{human_delta(band_hold)}/call")
     if not p["over"]:
         return "clear"
-    if p["wait"] is None:
-        # Over the m0 floor with no reset clause to solve against. The hook
-        # cannot compute a release, so it just re-checks on the chunk.
-        return (f"{'HOLDS' if enforced else 'would hold'} "
+    if p["wait"] is None or (now is not None and p["wake"] is not None
+                             and p["wake"] <= now):
+        # Over the m0 floor with no reset clause to solve against, or over a
+        # line whose window has reset since. The hook cannot compute a
+        # release, so it just re-checks on the chunk.
+        text = (f"{'HOLDS' if enforced else 'would hold'} "
                 f"-- unsolvable, re-checks every {human_delta(chunk)}")
+        if blind and enforced:
+            text += (f", through after {human_delta(blind_hold)}"
+                     if blind_hold is not None else ", no blind_delay")
+        return text
     return f"{'HOLDS' if enforced else 'would hold'} {human_delta(p['wait'])}"
 
 
@@ -2326,7 +2352,12 @@ def cmd_status(path):
     dflt = pol.get("defaults", {})
     m0, m1, band = line_geometry(pol, entry)
     chunk = entry.get("chunk", dflt.get("chunk", DEFAULT_CHUNK))
-    max_delay = entry.get("max_delay", dflt.get("max_delay", DEFAULT_MAX_DELAY))
+    # Resolved as the hook resolves it, not read raw: a quoted "300" the hook
+    # coerces would otherwise crash the min() below, and a negative one (which
+    # the hook clamps to 0) would print a release time in the past.
+    max_delay = off_or_num(entry, dflt, "max_delay", DEFAULT_MAX_DELAY)
+    if max_delay is not None and max_delay < 0:
+        max_delay = 0
     band_delay = entry.get("band_delay",
                            dflt.get("band_delay", DEFAULT_BAND_DELAY))
     # One hold inside the band costs band_delay, except where max_delay is
@@ -2336,6 +2367,16 @@ def cmd_status(path):
     band_hold = band_delay
     if band_hold is not None and max_delay is not None:
         band_hold = min(band_hold, max_delay)
+    # The same derivation for a blind hold: blind_delay and max_delay are both
+    # ceilings on it, and the tighter one is what the reader will see. The
+    # two clocks differ slightly in the hook (blind_delay counts from the
+    # start of the call), which is too fine to print. Resolved by the hook's
+    # own helper, so a garbage or negative value reads here as it acts there.
+    blind_delay = blind_delay_of(entry, dflt)
+    blind_hold = blind_delay
+    if max_delay is not None:
+        blind_hold = (max_delay if blind_hold is None
+                      else min(blind_hold, max_delay))
     model = (entry.get("model") or "").lower()
     enforce = normalize_enforce(entry.get("enforce", dflt.get("enforce")))
     print(f"matched rule:   {matched}")
@@ -2360,6 +2401,21 @@ def cmd_status(path):
     else:
         gear = "none"
     print(f"  band_delay    {gear}")
+    # Beside band_delay because both end a hold that max_delay would not, and
+    # the difference is the point: band_delay is a lower gear taken in sight
+    # of the line, blind_delay the limit on a hold with no line in sight.
+    if blind_delay is None:
+        # "Until it can see" is only the whole story with no max_delay: that
+        # one still ends a blind hold, and says so in the verdict below.
+        sight = "none -- a blind hold waits until it can see"
+        if max_delay is not None:
+            sight += f" (or max_delay, {human_delta(max_delay)})"
+    elif blind_delay == 0:
+        sight = "0 -- never holds blind"
+    else:
+        sight = (f"{human_delta(blind_delay)}, then a blind hold lets the "
+                 f"call through")
+    print(f"  blind_delay   {sight}")
     print(f"  enforces      {', '.join(sorted(enforce))}")
 
     # The hook's own check, so `status` cannot judge buckets the hook ignores.
@@ -2405,6 +2461,12 @@ def cmd_status(path):
         why = "paced false" if genabled else "global.enabled false"
         print(f"  ({why} -- nothing below is acted on; shown as it would be "
               f"judged)")
+    # What the hook itself would decide, from this same snapshot -- asked of
+    # the hook rather than recomputed, so `status` cannot claim a folder is
+    # running while the hook is holding it. Asked before the table, because
+    # whether an unsolvable row is held blind depends on the whole verdict.
+    d = hook.decide(pol, st, key, now, degraded=age > MAX_STALE)
+    blind = bool(active and d.get("blind"))
     for k, b in st["buckets"].items():
         enforced = active and (
             (k == "session" and "session" in enforce)
@@ -2421,6 +2483,17 @@ def cmd_status(path):
             # The hold column reports what happens to a caller on this model,
             # and that caller IS held; "would hold" would read as switched off.
             enforced = True
+        row_blind = blind
+        if mark == "per call":
+            # The verdict `d` was asked with no caller, so it never saw this
+            # row, and its blind flag says nothing about a caller who answers
+            # to it. Ask again as that caller: a Fable call held only by a
+            # wake-less week:Fable is blind, and the hook lets it through at
+            # blind_delay, which an unbounded "unsolvable" would hide.
+            family = k.split(":", 1)[1].strip().lower()
+            row_blind = bool(hook.decide(pol, st, key, now,
+                                         degraded=age > MAX_STALE,
+                                         caller_model=family).get("blind"))
         p = bucket_pace(b, now, m0, m1, band)
         if p is None:
             print(f"  {k:22} unusable (no percentage)")
@@ -2439,19 +2512,17 @@ def cmd_status(path):
         else:
             where = (f"line {p['allowed']:5.1f}% "
                      f"| {p['elapsed'] * 100:5.1f}% elapsed")
+        hold = describe_hold(p, enforced, chunk, band_hold, row_blind,
+                             blind_hold, now)
         print(f"  {k:22} {p['pct']:>3.0f}% used | {where} | {mark} "
-              f"| {describe_hold(p, enforced, chunk, band_hold)}")
+              f"| {hold}")
 
-    # What the hook itself would decide, from this same snapshot -- asked of
-    # the hook rather than recomputed, so `status` cannot claim a folder is
-    # running while the hook is holding it.
     if active and model == hook.DETECT and "model" in enforce:
         # Asked with no caller, so the verdict cannot see a `per call` row.
         # Without this it says "running" while those rows hold Fable for days.
         print("\n  (verdict below is for a caller with no per-model bucket; a "
               "caller whose model\n   has a `per call` row above also answers "
               "to that row)")
-    d = hook.decide(pol, st, key, now, degraded=age > MAX_STALE)
     print()
     if not d.get("paced"):
         print("right now:      not paced -- the hook returns immediately here")
@@ -2496,18 +2567,29 @@ def cmd_status(path):
             print("                only actually holds here if that refresh fails.")
         print(f"                No release to solve for; it re-checks every "
               f"{human_delta(chunk)}.")
-        if max_delay is not None:
-            print(f"                max_delay caps the hold at "
-                  f"{human_delta(max_delay)}, then it proceeds anyway.")
-        elif band_delay is not None:
+        if blind_hold is not None:
+            # Name the knob that fires, so the number can be traced back to
+            # a setting. A tie goes to blind_delay, as it does in the hook.
+            knob = ("blind_delay" if blind_delay is not None
+                    and blind_delay <= blind_hold else "max_delay")
+            print(f"                {knob} lets the call through after "
+                  f"{human_delta(blind_hold)}, and the")
+            print("                next tool call looks again.")
+        else:
+            print("                blind_delay is off: it holds until a "
+                  "usable reading")
+            print("                appears, or the harness kills it at its "
+                  "registered timeout.")
+        if band_delay is not None:
             # The one place a reader will expect band_delay to apply and find
             # that it does not. Blind is reported as `over` on purpose: "I
             # cannot see" must not resolve to "I am under the brake line",
             # which is what letting band_delay release this would assert.
             print("                band_delay does not apply while blind, and "
                   "deliberately:")
-            print("                only max_delay proceeds on data we know we "
-                  "do not have.")
+            print("                only blind_delay and max_delay proceed on "
+                  "data we know")
+            print("                we do not have.")
     elif region == "band":
         when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
         print(f"right now:      THROTTLED -- {reason}")
@@ -3053,7 +3135,8 @@ checkpoint.
 Running `on` again for a path that already has a rule changes only the
 settings you name and keeps the rest. Settings a rule does not carry fall back
 to the `defaults` block of policy.json (initially m0 5, m1 8, no cap, a 7%
-band held 3m per call), which `niceclaude list` prints.
+band held 3m per call, a blind hold ended at 4m), which `niceclaude list`
+prints.
 
 Each window's pace line is  allowed = m0 + f_t * (100 - m0 - m1),  where f_t
 is the fraction of the window's time elapsed. Usage over the line brakes the
@@ -3063,6 +3146,14 @@ folder until the line catches up.
 work resumes with a band of headroom instead of a fraction of a percent. With
 --band-delay the space between the lines becomes a lower gear -- one hold per
 tool call, taken while still under the pace line -- rather than a free run.
+
+A hold the hook cannot justify from data -- no usable reading, or a stale
+one under the line with the refresh failing, or every over-line bucket
+lacking a reset time -- is blind. --blind-delay ends it after that many
+seconds (default 240, inside the 5-minute prompt cache) and lets the call
+through, logged as blind-release; the next call looks again. A slow refresh
+can still run past it. --no-blind-delay holds until it can see, or until
+max_delay if one is set.
 
 The per-model weekly bucket is enforced per call under `detect`, the
 default for a rule with no model: each caller's model is read from its own
@@ -3100,6 +3191,7 @@ examples:
   niceclaude on ~/projects/alpha --model opus --enforce session
   niceclaude on ~/projects/nightly --max-delay 240
   niceclaude on ~/projects/nightly --band 2 --band-delay 30
+  niceclaude on ~/projects/nightly --blind-delay 600
   niceclaude on ~/projects/nightly --subagent-cache-1h
   niceclaude on / --model opus              # pace everything, then carve
   niceclaude off ~/projects/urgent          #   out what should run free
@@ -3466,6 +3558,23 @@ def build_parser():
                           "only, no lower gear. Writes an explicit null, so "
                           "it also overrides a band_delay set in the "
                           "policy's defaults")
+    blind = o.add_mutually_exclusive_group()
+    blind.add_argument("--blind-delay", type=float, dest="blind_delay",
+                       metavar="SECONDS",
+                       help="end a hold that cannot see -- no usable usage "
+                            "reading, or none that gives a release time -- "
+                            "after this many seconds, and let the call "
+                            "through; the next tool call looks again. 0 "
+                            "never holds blind. Default: the policy's, "
+                            "initially 240 (4 minutes), under the prompt "
+                            "cache's 5-minute TTL")
+    blind.add_argument("--no-blind-delay", action="store_true",
+                       dest="no_blind_delay",
+                       help="hold a blind call until a usable reading "
+                            "appears (only max_delay, if set, or the "
+                            "harness timeout then ends it). Writes an "
+                            "explicit null, so it also overrides a "
+                            "blind_delay set in the policy's defaults")
     o.add_argument("--enforce", metavar="WINDOWS",
                    help="comma-separated windows to pace against: session "
                         "(the 5h window), week (the shared weekly window), "
@@ -3573,7 +3682,8 @@ def main(argv=None):
     if a.cmd == "on":
         return cmd_on(a.path, a.model, a.m0, a.m1, a.fanout_reserve, a.enforce,
                       a.max_delay, a.no_max_delay, a.band, a.band_delay,
-                      a.no_band_delay, a.subagent_ttl)
+                      a.no_band_delay, a.subagent_ttl, a.blind_delay,
+                      a.no_blind_delay)
     if a.cmd == "off":
         return cmd_off(a.path)
     if a.cmd == "global":

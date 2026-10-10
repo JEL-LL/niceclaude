@@ -300,6 +300,26 @@ DEFAULT_BAND = 7
 # every prompt cache TTL, so the crawl stays warm.
 DEFAULT_BAND_DELAY = 180
 
+# How long one tool call may be held BLIND, in seconds: held with no release
+# that data can justify -- no usable bucket, a snapshot too old to trust with
+# the refresh failing, or every hot bucket over its floor with no reset clause
+# to solve against (hook.decide marks all three `blind`). Past it the call goes
+# through, logged `blind-release`, and the next tool call looks again.
+#
+# This is a deliberate exception to "never proceed on data we do not have",
+# and the user's rule is what makes it one: never stall forever, fail free
+# rather than freeze. Without it a blind hold had no ceiling but HOOK_TIMEOUT,
+# i.e. two days, on an outage the hook could do nothing about.
+#
+# 240 rather than anything longer because the cost being bounded is the
+# prompt cache, not the wait. A hold that outlives the 5-minute TTL makes the
+# next turn re-read its context from cold, and an agent blind on every call
+# would pay that on every call. Under the TTL, a long outage degrades to a
+# slow, warm crawl. None is the old hold-until-seen behaviour, and 0 never
+# holds blind at all. A confident brake -- one with a real wake time, stale or
+# not -- is untouched: that is max_delay's business.
+DEFAULT_BLIND_DELAY = 240
+
 # What `install` registers as the hook's `timeout`, in seconds. This is the
 # REAL ceiling on any hold: the harness kills the hook when it expires, the
 # agent takes its tool call unpaced, and nothing is logged -- the killed process
@@ -343,6 +363,9 @@ NEAR_STALE = 15
 # above so hard to see: the ceiling everyone was looking for had never been the
 # one in this file. HOOK_TIMEOUT is the real ceiling; `max_delay` is the one you
 # are meant to set.
+#
+# blind_delay (above) is a ceiling too, but only on a hold that cannot see. A
+# hold justified by data still has none of its own.
 
 WINDOW_SECONDS = {"session": 5 * 3600, "week": 7 * 86400}
 
@@ -350,7 +373,8 @@ DEFAULT_POLICY = {
     "global": {"enabled": True},
     "defaults": {"m0": DEFAULT_M0, "m1": DEFAULT_M1, "chunk": DEFAULT_CHUNK,
                  "max_delay": DEFAULT_MAX_DELAY, "band": DEFAULT_BAND,
-                 "band_delay": DEFAULT_BAND_DELAY},
+                 "band_delay": DEFAULT_BAND_DELAY,
+                 "blind_delay": DEFAULT_BLIND_DELAY},
     "paths": {},
 }
 
@@ -414,9 +438,10 @@ def coerce_num(value, fallback):
 def off_or_num(entry, defaults, key, fallback):
     """Resolve a knob whose `null` means OFF rather than "not set".
 
-    `max_delay`, `band` and `band_delay` are all switches with a number on
-    them, and the CLI turns one off by writing an explicit `null` into the
-    rule (`--no-max-delay`, `--no-band-delay`) rather than by deleting the key
+    `max_delay`, `band`, `band_delay` and `blind_delay` are all switches with
+    a number on them, and the CLI turns one off by writing an explicit `null`
+    into the rule (`--no-max-delay`, `--no-band-delay`, `--no-blind-delay`)
+    rather than by deleting the key
     -- deleting it would inherit whatever `defaults` says, which is the
     opposite of what the flag asked for.
 
@@ -432,6 +457,23 @@ def off_or_num(entry, defaults, key, fallback):
             value = src[key]
             return None if value is None else coerce_num(value, fallback)
     return fallback
+
+
+def blind_delay_of(entry, defaults):
+    """The `blind_delay` in force for a rule, in seconds, or None for off.
+
+    One resolver for the hook and `status` both, so the line `status` prints
+    cannot disagree with the hold the hook takes. Read with off_or_num, since
+    it ships set and a written null has to mean off. A negative value clamps
+    to 0 -- "never hold blind" -- rather than None: unlike band_delay, whose
+    0 means no throttle, the closest honest reading of "less than no wait" is
+    no wait, not an unbounded one.
+    """
+    blind_delay = off_or_num(entry, defaults, "blind_delay",
+                             DEFAULT_BLIND_DELAY)
+    if blind_delay is not None and blind_delay < 0:
+        blind_delay = 0
+    return blind_delay
 
 
 def model_matches(bucket_key, model):

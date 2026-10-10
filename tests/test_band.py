@@ -997,9 +997,13 @@ def test_band_delay_does_not_release_a_blind_agent(blind_running):
     died happened to read "in band": `decide` returns the band decision before
     the degraded branch is reached. A snapshot that says "free" is caught (see
     above), so the hole is only open in the region where it is most expensive.
+
+    blind_delay is pinned off: it is the one other knob that frees a blind
+    agent, by design, and left at its default it would end this hold at 240s
+    and mask whatever band_delay did or did not do (test_blind_delay.py).
     """
     with pytest.raises(StillHolding):
-        blind_running(entry=paced(band=BAND, band_delay=5),
+        blind_running(entry=paced(band=BAND, band_delay=5, blind_delay=None),
                       clock=Probe(stop_after=600))
 
 
@@ -1198,9 +1202,13 @@ def test_decide_holds_on_the_chunk_over_the_floor(cwd):
 def test_band_delay_cannot_release_a_hold_over_the_floor(running):
     """The doctrine again, on the path most likely to hit it in practice: a
     window that has just rolled and is not yet reporting a reset clause. We are
-    over the only line we can draw, so only max_delay may cut this short."""
+    over the only line we can draw, so band_delay may not cut this short.
+
+    With no reset clause there is no real wake, so this hold is blind and
+    blind_delay would end it at 240s; pinned off so the probe still sees what
+    band_delay alone does (test_blind_delay.py covers the release)."""
     with pytest.raises(StillHolding):
-        running(entry=paced(band=20, band_delay=5),
+        running(entry=paced(band=20, band_delay=5, blind_delay=None),
                 buckets={"session": floating_bucket(HOT_PCT)},
                 clock=Probe(stop_after=300))
 

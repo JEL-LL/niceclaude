@@ -28,8 +28,9 @@ import time
 from ._shared import (
     ACCOUNT_KEY,
     DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK, DEFAULT_FANOUT_RESERVE,
-    DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY, HOOK_LOG_PATH, bucket_pace,
-    coerce_num, normalize_enforce, MAX_STALE, NEAR_STALE, off_or_num,
+    DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY, HOOK_LOG_PATH,
+    blind_delay_of, bucket_pace, coerce_num, normalize_enforce, MAX_STALE,
+    NEAR_STALE, off_or_num,
     POLICY_PATH,
     STATE_PATH, model_matches, norm_path, path_within,
 )
@@ -346,14 +347,20 @@ def model_tag(policy, entry, caller_model):
 def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
            caller_model=None):
     """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..,
-    'chunk':..,'max_delay':..,'band_delay':..,'region':..,'hold':..}.
+    'chunk':..,'max_delay':..,'band_delay':..,'blind_delay':..,'region':..,
+    'hold':..}.
 
     'region' is geometric -- 'free', 'band' or 'over' -- and is reported even
     when nothing brakes, because `run` uses it to decide how fresh the snapshot
     has to be before it dares let a step through.
 
     'hold' is what to do about it: None, 'soft' (cappable at band_delay) or
-    'hard' (only max_delay may cut it short).
+    'hard' (only max_delay may cut it short -- and blind_delay, if 'blind').
+
+    'blind' marks a hard hold that THE BLIND RULE (in the body, above the
+    `if hot:` branch) finds unjustified: no governing bucket -- the hot
+    entries, plus the banded ones when `hard` is latched -- has a wake
+    strictly after `now`. It is what `run` lets blind_delay release.
 
     `hard` is the CALLER'S MEMORY, and it is what makes the band hysteresis
     real. This function is stateless: it reclassifies from scratch every pass,
@@ -363,6 +370,8 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     band would be decoration. Passing `hard=True` says "this hold began above
     the brake line", and a hold that began there runs all the way down to the
     throttle line rather than stopping at the brake line on the way past.
+    `run` latches it only on a hard hold that is not blind: a blind hold has
+    seen no line to begin above.
 
     `degraded` means the snapshot is older than MAX_STALE and could not be
     refreshed -- we are flying blind. Stale data is not useless, though: usage
@@ -372,8 +381,10 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         stale data can justify BRAKING, but never ALLOWING.
 
     So a degraded snapshot that already says "over the line" is acted on with
-    full confidence (it can only have got worse), while a degraded snapshot that
-    says "under the line" is treated as unknown and brakes anyway.
+    full confidence while its wake is still ahead (it can only have got worse)
+    -- unless its window has reset since the reading, which voids the lower
+    bound and makes the hold blind (see THE BLIND RULE). A degraded snapshot
+    that says "under the line" is treated as unknown and brakes anyway.
 
     Note there is no truthiness trap here: the jq version's `//` operator falls
     back on false as well as null, which silently disabled the kill switch and
@@ -427,6 +438,10 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         # release, which would write a throttle/release pair to hook.log on
         # every tool call for a hold that never happened.
         band_delay = None
+    # The ceiling on a hold that cannot see. Surfaced on every verdict, blind
+    # or not, because `run` re-reads it each pass and a hold can turn blind
+    # mid-way; resolved in _shared so `status` reads the same number.
+    blind_delay = blind_delay_of(entry, defaults)
     model = declared = (entry.get("model") or "").lower()
     if declared == DETECT:
         # `caller_model` is the family `run` read from the caller's own
@@ -452,8 +467,9 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         # see", since the snapshot is there and was read. That covers a model
         # with no bucket at all (declared `opus`; no week:Opus exists), an
         # undeclared model, and under `detect` an Opus call, an unknown model
-        # or a SubagentStart. Falling through would brake it blind, uncapped
-        # by default, until the harness timeout (open-questions 12).
+        # or a SubagentStart. Falling through would brake it blind on every
+        # call -- once until the harness timeout (open-questions 12), now for
+        # a blind_delay apiece, which is still a hold for nothing.
         #
         # A missing per-model row is ignored even for a model that has one.
         # The renderer drops a row whose utilization is null, so a Fable call
@@ -466,12 +482,14 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         # sample_once leaves only week:Fable): that is "cannot see".
         return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
+                "blind_delay": blind_delay,
                 "region": "free", "blind": False}
     if not enforced:
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": now + chunk,
                 "reason": "no usable buckets in snapshot", "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
+                "blind_delay": blind_delay,
                 "region": "over", "blind": True}
 
     # Kept apart, because the two demand different things. An `over` bucket
@@ -492,7 +510,11 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         if p is None:
             # Unusable reads as the most restrictive region, not the most
             # convenient one: we cannot see where this bucket stands.
-            hot.append((key, f"{key}: unusable", now + chunk))
+            # The fourth field says whether this entry's wake is a real one:
+            # False here and on the floor below, where it is only the next
+            # look, and on a wake at or before `now` (see the over-line case).
+            # A hot hold with no real wake anywhere is blind.
+            hot.append((key, f"{key}: unusable", now + chunk, False))
             continue
         if p["region"] == "free":
             continue
@@ -502,10 +524,20 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
             # :g so a coerced m0 reads "5%" rather than "5.0%" -- these strings
             # go straight into hook.log, which is read by eye.
             hot.append((key, f"{key} {p['pct']}% over floor {m0:g}%",
-                        now + chunk))
+                        now + chunk, False))
         elif p["region"] == "over":
+            # Real only while it is still ahead of us. bucket_pace clamps the
+            # wake to the window's reset, so a wake at or before `now` means
+            # the window has ALREADY reset since this reading: the snapshot
+            # predates the zeroing, is no longer a lower bound on anything,
+            # and a stale one with the refresh failing would otherwise brake
+            # "with confidence" for as long as the outage lasts. Nor is a past
+            # wake one to aim at: as wake_at it would make `run` nap the 1s
+            # floor for the whole hold, so re-check on the chunk instead, as
+            # every other wake-less entry does.
+            real = p["wake"] > now
             hot.append((key, f"{key} {p['pct']}% over line {p['allowed']:.1f}%",
-                        p["wake"]))
+                        p["wake"] if real else now + chunk, real))
         else:
             banded.append((key,
                            f"{key} {p['pct']}% in band (line {p['allowed']:.1f}%, "
@@ -516,16 +548,44 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # because `run` uses it to decide how fresh the snapshot has to be.
     region = "over" if hot else "band" if banded else "free"
 
+    # THE BLIND RULE. Every hard hold below is classified by this, and `run`
+    # cites it rather than restating it:
+    #
+    #   A hard hold is blind if and only if no bucket that governs it has a
+    #   wake strictly in the future that its reading supports.
+    #
+    # The governing buckets are the hot entries, plus the banded entries once
+    # `hard` is latched (a descent from over the line is still owed). A wake
+    # at or before `now` is not supported: bucket_pace clamps every wake to
+    # its window's reset, so a past one means the window has reset since the
+    # reading and the reading bounds nothing. A wake-less entry -- unusable,
+    # or over the floor with no reset clause -- supports nothing.
+    #
+    # Staleness does NOT enter into it. A stale pct is a lower bound (usage
+    # only rises within a window), so a stale reading above a line proves the
+    # true one is above it too, and any wake it gives is finite. That is
+    # reason enough to HOLD. It is never reason to PROCEED, which is why the
+    # soft-band branch, and only it, refuses stale data.
+    supported = any(h[2] > now for h in banded) if hard else False
+
     if hot:
         # Confident even when degraded: consumption only rises, so a stale
         # reading that is already over the line is a floor, not a guess. The
         # wake comes from the over buckets alone; a band bucket is named in the
         # reason so the log tells the whole story, but does not lengthen this.
+        #
+        # Blindness by THE BLIND RULE above: a hot entry's fourth field says
+        # whether its own wake is supported, and a latched descent's band
+        # wakes count as well -- so an unusable sibling appearing mid-descent
+        # does not turn a justified hold into a blind one. One supported wake
+        # anywhere and it is not blind, however wake-less the rest.
+        seen = any(h[3] for h in hot) or supported
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": max(h[2] for h in hot),
                 "reason": "; ".join(h[1] for h in hot + banded),
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay, "region": region, "blind": False}
+                "band_delay": band_delay, "blind_delay": blind_delay,
+                "region": region, "blind": not seen}
 
     # A hold that began above the brake line does not end at it.
     #
@@ -540,12 +600,19 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # Note the cap: this is a `hard` hold, so band_delay has no say in it. The
     # agent is coming down from over the line and the only knob that may cut
     # that short is max_delay, exactly as before the band existed.
-    if banded and hard and not degraded:
+    #
+    # Taken whenever THE BLIND RULE above finds a supported band wake, stale
+    # or not: a stale reading still above the throttle line proves the true
+    # one is too, so the descent is still owed and is not blind. A latched
+    # hold whose band wakes have all passed (the window reset under a stale
+    # reading) supports nothing, and falls through to the branches below.
+    if banded and supported:
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": max(h[2] for h in banded),
                 "reason": "; ".join(h[1] for h in banded) + " [running down]",
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay, "region": region, "blind": False}
+                "band_delay": band_delay,
+                "blind_delay": blind_delay, "region": region, "blind": False}
 
     # Two ways a band stops being a reason to hold.
     #
@@ -557,16 +624,18 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # "Proceed, but slowly" is still proceeding, and proceeding is the one
     # thing stale data can never justify -- the whole asymmetry this function
     # is built on. Falling through hands it to the degraded branch below, which
-    # holds and lets only max_delay out: the same treatment a stale "under the
-    # line" has always got. Without this, band_delay would quietly become a
-    # second knob that proceeds while blind, which is exactly the property
-    # max_delay is documented and opt-in for.
+    # holds blind and lets out only max_delay and blind_delay: the same
+    # treatment a stale "under the line" gets. Without this, band_delay would
+    # quietly become a third knob that proceeds while blind, a property that
+    # belongs to max_delay (opt-in) and blind_delay (bounded, and logged as a
+    # blind-release) alone.
     if banded and band_delay is not None and not degraded:
         return {"paced": True, "braked": True, "hold": "soft",
                 "wake_at": max(h[2] for h in banded),
                 "reason": "; ".join(h[1] for h in banded),
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay, "region": region, "blind": False}
+                "band_delay": band_delay,
+                "blind_delay": blind_delay, "region": region, "blind": False}
 
     if degraded:
         # Under the line according to data we know to be out of date. That is
@@ -575,19 +644,20 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         # completely different problems at 3am.
         # Reported as "over", and deliberately: "I cannot see" must not resolve
         # to "I am comfortably below the brake line", which is exactly what
-        # letting band_delay release this would assert. Only max_delay -- the
-        # one knob documented as proceeding while over the line -- frees a
-        # blind agent, same as before the band existed.
+        # letting band_delay release this would assert. What frees a blind
+        # agent is max_delay, the knob documented as proceeding while over the
+        # line, or blind_delay, the one that exists for exactly this case.
         age = int(now - (state.get("ts_epoch") or now))
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": now + chunk,
                 "reason": f"BLIND: snapshot {age}s old and refresh failing",
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay, "region": "over", "blind": True}
+                "band_delay": band_delay,
+                "blind_delay": blind_delay, "region": "over", "blind": True}
 
     return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
             "max_delay": max_delay, "band_delay": band_delay,
-            "region": region, "blind": False}
+            "blind_delay": blind_delay, "region": region, "blind": False}
 
 
 # Backoff for refresh attempts. If /usage is unreachable -- network down, auth
@@ -624,6 +694,9 @@ def snapshot_age(state, now):
 def run(cwd, event=None, payload=None):
     # `payload` is the hook's stdin, read only to detect the caller's model.
     brake_start = None
+    started = time.time()  # the invocation's own start, for blind_start
+    blind_start = None   # when this run of continuous blindness began; None
+                         # while the hold (if any) is one data justifies
     caller = None        # the caller's model family, under `detect` only
     detected = False     # detection is tried at most once per invocation: a
                          # frozen agent cannot change model while frozen (D5)
@@ -652,6 +725,7 @@ def run(cwd, event=None, payload=None):
 
     while True:
         now = time.time()
+        pass_start = now     # before any refresh this pass makes
         policy = load_json(POLICY_PATH, {})
 
         # Cheapest possible gate, and it must come first: an unpaced folder
@@ -675,6 +749,10 @@ def run(cwd, event=None, payload=None):
         degraded = age is None or age > MAX_STALE
         d = decide(policy, state, cwd, now, degraded=degraded, event=event,
                    hard=hard, caller_model=caller)
+        # Whether this pass was blind BEFORE any refresh. A hold that turns
+        # blind mid-way turns at this decide, not the one after the refresh,
+        # so the refresh below is blind time and must be on the blind clock.
+        pre_blind = bool(d.get("blind"))
 
         # How fresh the snapshot must be depends on where the last one said we
         # stand. Well under the throttle line, MAX_STALE is plenty. At or above
@@ -687,7 +765,25 @@ def run(cwd, event=None, payload=None):
         # invocation.
         limit = (NEAR_STALE if first and d.get("region") in ("band", "over")
                  else MAX_STALE)
-        if (age is None or age > limit) and now >= next_try:
+        # No refresh once the blind allowance is spent. The last nap lands
+        # exactly on the blind deadline, and a refresh started now is
+        # synchronous and can take up to its own 180s timeout before the
+        # release check below ever runs -- so the call would cost blind_delay
+        # plus a refresh, the overrun this knob exists to bound. The next
+        # tool call refreshes anyway.
+        #
+        # Judged from the pre-refresh decide, on the clock as it will stand
+        # once this pass is counted: a hold turning blind here starts it at
+        # pass_start. Not on the first pass, whose refresh is what may cure a
+        # merely stale snapshot -- skipping it there (blind_delay 0 is the case
+        # that could) would leave every call blind with nothing ever looking.
+        clock = blind_start
+        if clock is None and pre_blind and brake_start is not None:
+            clock = pass_start
+        spent = (clock is not None and pre_blind
+                 and d.get("blind_delay") is not None
+                 and now >= clock + d["blind_delay"])
+        if (age is None or age > limit) and now >= next_try and not spent:
             if refresh_snapshot():
                 fails = 0
                 next_try = 0.0
@@ -710,9 +806,40 @@ def run(cwd, event=None, payload=None):
 
         # Latch. Once a hold is hard it stays hard for the rest of this
         # invocation, which is what carries it down through the band.
+        #
+        # Only a hold that data justifies sets it -- one `decide` does not mark
+        # blind, under THE BLIND RULE stated there. A blind hold is hard too,
+        # but it never saw the brake line, so it has nothing to run down
+        # from: latched, the next pass would let any band bucket with a
+        # future wake "justify" it as a descent, un-blind it, reset the blind
+        # clock, and hold until that band wake -- hours, on the weekly line.
+        # A hold that DID begin over the line keeps its latch through a later
+        # blind spell, which is intended: the descent is still owed.
         soft = d.get("hold") == "soft"
-        if not soft:
+        if not soft and not d.get("blind"):
             hard = True
+
+        # The blind clock, which runs while `decide` says blind (THE BLIND
+        # RULE, stated there). What it bounds is continuous blindness within
+        # this one tool call, so that no call ever costs more than blind_delay
+        # of it. Blind from the first pass, it starts at the start of `run`:
+        # the refresh that just failed was time spent not seeing, and leaving
+        # it out would let a slow failing refresh stretch every blind hold.
+        # Turned blind mid-hold, it starts at the start of the pass that
+        # first saw it, for the same reason; data that justifies the hold
+        # again resets it, since a real brake is not blindness and must not
+        # use up the allowance of the next stretch that is. A refresh in
+        # flight is synchronous and can still overrun it by up to its own
+        # timeout.
+        if d.get("blind"):
+            if blind_start is None:
+                # Mid-hold, from the start of the pass that first saw it, so
+                # a failed refresh in that pass is counted; if only the
+                # post-refresh decide is blind, from now.
+                blind_start = (started if brake_start is None
+                               else pass_start if pre_blind else now)
+        else:
+            blind_start = None
 
         if brake_start is None:
             brake_start = now
@@ -762,23 +889,45 @@ def run(cwd, event=None, payload=None):
         # releases while STILL OVER, the agent takes one more step, and the
         # next PreToolUse brakes again -- the restraint survives as many short
         # holds rather than one long one, but the ceiling is what pays. It
-        # remains the only place this tool deliberately proceeds while over the
-        # line, blind included, which is why it is opt-in and off by default.
+        # remains the only place this tool deliberately proceeds while KNOWN to
+        # be over the line, which is why it is opt-in and off by default.
         #
         # So the efficiency knob and the guarantee no longer fight: you can be
         # cache-warm in the band without spending the ceiling to get there.
         #
-        # With neither cap in force the hold ends only when the throttle line
+        # `blind_delay` is the third, and it is not about cost at all: it
+        # bounds a hold that cannot see. With no reading that could justify
+        # the hold, holding until one appears is a stall that could run to the
+        # harness timeout -- and the rule is to fail free rather than stall
+        # forever. It runs on its own clock (blind_start, above) rather than
+        # brake_start's, because what it caps is the blind part of a hold, not
+        # the whole; and every cap in force is a ceiling, so the tightest one
+        # ends the hold. A confident brake -- over the line with a real wake,
+        # however stale -- never sees it.
+        #
+        # With no cap in force the hold ends only when the throttle line
         # catches up, the folder is unpaced, or the harness kills the hook at
         # its registered timeout -- and that last one is silent, which is why
         # an unmatched brake in hook.log means "timed out", not "hung".
         max_delay = d.get("max_delay")
         band_delay = d.get("band_delay")
+        blind_delay = d.get("blind_delay")
         cap = max_delay
         if soft and band_delay is not None:
             cap = band_delay if max_delay is None else min(band_delay, max_delay)
+        deadline = None if cap is None else brake_start + cap
+        blind_deadline = (None if blind_start is None or blind_delay is None
+                          else blind_start + blind_delay)
 
-        if cap is not None and now - brake_start >= cap:
+        # Checked first, so a tie goes to the blind label: when both ceilings
+        # fall on the same instant, "we could not see" is the truer account
+        # of why the call went through, and the one a reader of hook.log has
+        # to act on. When max_delay falls strictly first, its own
+        # WHILE-BLIND label says the same with the knob that fired.
+        if blind_deadline is not None and now >= blind_deadline and (
+                deadline is None or blind_deadline <= deadline):
+            return brake_start, "blind-release"
+        if deadline is not None and now >= deadline:
             if soft:
                 return brake_start, "band-release"
             return brake_start, ("max_delay-release-WHILE-BLIND"
@@ -794,12 +943,15 @@ def run(cwd, event=None, payload=None):
         # within one chunk instead of one backoff interval.
         chunk = d.get("chunk", DEFAULT_CHUNK)
         nap = min(chunk, max(1.0, d.get("wake_at", now + chunk) - now))
-        if cap is not None:
+        if blind_deadline is not None:
+            deadline = (blind_deadline if deadline is None
+                        else min(deadline, blind_deadline))
+        if deadline is not None:
             # Without this a cap shorter than the chunk would still sleep a
             # whole chunk, so `--max-delay 5` under the default 15s chunk would
             # hold for 15. Never below 1s: the release check above uses >=, so a
             # zero nap would spin.
-            nap = max(1.0, min(nap, brake_start + cap - now))
+            nap = max(1.0, min(nap, deadline - now))
         time.sleep(nap)
 
 

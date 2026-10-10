@@ -462,3 +462,35 @@ and an on-demand refresh by the hook. If so, a worse collision could tear a
 real record, not just repeat a tail. Worth checking how `append_log` writes
 (one `write` of the whole line, or several; with what open mode) and
 whether Windows append is atomic for that size.
+
+---
+
+## 15. Sighting: `coerce_num` reads a JSON boolean as a number — OPEN
+
+Filed 2026-10-10, seen while writing `tests/test_blind_delay.py`.
+
+`_shared.coerce_num` falls back on anything `float()` rejects, but `float()`
+accepts a bool: `true` becomes 1.0 and `false` 0.0. So a hand-edited
+`"max_delay": true` (someone reading it as "on") caps every hold at one
+second, `"band_delay": false` turns the lower gear off, and `"m0": false`
+draws the line with no grubstake — each one silently, where the docstring
+promises garbage falls back to the default. Every knob read through
+`coerce_num` or `off_or_num` is affected, `blind_delay` included.
+
+Not fixed in the blind-delay work, being outside its scope. The likely fix is
+an `isinstance(value, bool)` check before the `float()` in `coerce_num`, with
+a test per knob; worth checking first that nothing writes a bool on purpose.
+
+---
+
+## 16. Sighting: `status` reads `band_delay` and `chunk` raw — OPEN
+
+Filed 2026-10-10, seen while fixing the same problem for `max_delay` in the
+blind-delay work. `cmd_status` reads `band_delay` and `chunk` with
+`entry.get(...)` rather than resolving them the way `hook.decide` does
+(`off_or_num` or `coerce_num`, with `band_delay <= 0` read as unset). So a
+quoted value the hook coerces happily, `"band_delay": "30"`, crashes `status`
+with a TypeError: in `human_delta`, or in `min()` against `max_delay`. And a
+`band_delay` of 0, which the hook treats as no throttle, is printed as `0s per
+tool call`. `max_delay` and `blind_delay` are now resolved as the hook does;
+these two are not, being outside that work's scope.
