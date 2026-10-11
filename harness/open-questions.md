@@ -494,3 +494,15 @@ with a TypeError: in `human_delta`, or in `min()` against `max_delay`. And a
 `band_delay` of 0, which the hook treats as no throttle, is printed as `0s per
 tool call`. `max_delay` and `blind_delay` are now resolved as the hook does;
 these two are not, being outside that work's scope.
+
+---
+
+## 17. Sighting: two stale cross-references in the harness docs — OPEN
+
+Filed 2026-10-11, seen while writing the blind-delay docs. `test-matrix.md`'s
+*Daemon lifecycle* section points to `design-decisions.md` §13 for "do not
+manage it by process name", but that section is §14 (§13 is *Pure Python,
+stdlib only*). And `harness/README.md`'s "Read these in order" table lists
+every plan but `per-account-state-plan.md`, which decision 19 and the same
+README's *State on disk* section both cite. Neither is wrong about behaviour;
+both send a reader to the wrong place, or to nowhere.

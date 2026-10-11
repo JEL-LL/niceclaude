@@ -68,6 +68,10 @@ printf '{"cwd":"/tmp/tp","hook_event_name":"PreToolUse"}' | timeout 3 niceclaude
 | 10 | session `pct 0`, `resets_epoch null` | `/tmp/tp` | **allow** — freshly rolled window must not brake |
 | 11 | Fable 99%, `--model detect`, payload `transcript_path` → a file whose last line is `{"type":"assistant","message":{"model":"claude-fable-5-1"}}` | `/tmp/tp` | **brake** — detected Fable caller; `hook.log` ends `model=fable(detected)` |
 | 12 | as 11, but the model is `claude-opus-5-5` | `/tmp/tp` | **allow** — detected Opus caller has no per-model bucket |
+| 13 | `"buckets": {}`, `on /tmp/tp --blind-delay 5`, run under `timeout 15` | `/tmp/tp` | **allow after ~5s** — blind hold fails free; `hook.log` ends `release ... (blind-release)` |
+| 14 | session **50%**, `resets_epoch null`; `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — over the floor with no reset clause is wake-less, so blind |
+| 15 | session **50%**, week 5%; `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **brake** (exit 124) — a real wake makes it a confident brake, which `blind_delay` never touches |
+| 16 | as 13, but `--no-blind-delay` | `/tmp/tp` | **brake** (exit 124) — the old hold-until-seen behaviour |
 
 Case 3 guards component-wise prefix matching. Case 10 guards the fail-safe
 exception in `design-decisions.md` §11 — the naive version brakes hardest
@@ -87,7 +91,18 @@ and transcript facts only, never content. It must still show no `model` key
 in any payload, no subagent transcript at `SubagentStart`, and the
 subagent's own record at its first `PreToolUse` on the derived path.
 
-Latency should be **~20ms** for every allow case.
+Cases 13–16 re-check `blind_delay` (`design-decisions.md` §22). Write each
+fixture just before driving the hook: a snapshot at or over the line is
+refreshed once it is older than 15s (`NEAR_STALE`), which would replace it with
+live data. Put the default back afterwards with
+`niceclaude on /tmp/tp --blind-delay 240`. The
+automated cover is `tests/test_blind_delay.py`: the default and its overrides,
+`blind-release` for each kind of blind hold, a stale-but-over brake and a soft
+hold left alone, a mixed hot hold that is not blind, the clock across a hold
+that turns un-blind and back, the latch, the tightest cap winning, and the
+`on` and `status` surfaces.
+
+Latency should be **~20ms** for every allow case except 13 and 14.
 
 ---
 

@@ -18,6 +18,7 @@ Everything here is technical and public-safe.
 | `windows-results.md` | Created by whoever runs the Windows checks |
 | `freeze-validation.md` | Evidence for the 3-hour freeze |
 | `model-detection-plan.md` | Plan for detecting the model per hook call (`open-questions.md` §9) |
+| `blind-delay-plan.md` | Plan for `blind_delay`, the bounded wait on a hold that cannot see (`design-decisions.md` §22) |
 
 ## The one-paragraph summary
 

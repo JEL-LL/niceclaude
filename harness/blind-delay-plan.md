@@ -4,11 +4,13 @@ A hold the hook cannot justify from data ends after `blind_delay` seconds and
 lets the call through, logged as `blind-release`. Default 240 (4 minutes).
 Symbols are cited by name, not line number.
 
-**Status: Phase 1 (behaviour) done — six same-model review rounds and a
+**Status: done. Phase 1 (behaviour) — six same-model review rounds and a
 Fable gate; 853 passed, 4 skipped. Rounds 1–4 each found a defect in the
 blind-versus-justified classification, which led to THE BLIND RULE in
-`hook.decide` and its matrix test. Phase 2 (docs) not started. Both run under
-`pipelines/ratchet.md`.**
+`hook.decide` and its matrix test. Phase 2 (docs) done: `README.md`,
+`CHANGELOG.md`, `design-decisions.md` §11, §12, §17 and the new §22,
+`test-matrix.md` cases 13–16, and this file in `harness/README.md`. Both ran
+under `pipelines/ratchet.md`.**
 
 **Test baseline before any change:** 754 passed, 4 skipped at a4c3312
 (`uv run --with pytest pytest tests/ -q`, Linux, ~31s).
@@ -108,6 +110,6 @@ shows the line. Use the existing fake-clock / monkeypatch style in
 `README.md` (settings table / knobs), `CHANGELOG.md` Unreleased (behaviour
 change first: blind holds now end after 4 minutes by default),
 `harness/design-decisions.md` — amend §11 and §12 and §17 where they say a
-blind hold is uncapped, and add §21 recording this decision and the user's
+blind hold is uncapped, and add §22 recording this decision and the user's
 quote; `harness/test-matrix.md` new case(s); `harness/README.md` file table
 gets this plan. Mark this plan done.

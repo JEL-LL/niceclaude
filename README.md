@@ -314,8 +314,9 @@ That writes an explicit `null` rather than dropping the key, so it also
 overrides a cap set in `defaults` — otherwise "off" would silently leave one in
 force wherever a default is configured.
 
-This is the one setting that deliberately proceeds while over the line, so it
-is opt-in. `niceclaude status` reports the cap and what it will actually do:
+This is the one setting that deliberately proceeds while *known* to be over the
+line, so it is opt-in. (`--blind-delay`, below, proceeds when the hook cannot
+tell where the line is, which is a different thing.) `niceclaude status` reports the cap and what it will actually do:
 
 ```
 right now:      BRAKED -- session 90% over line 48.5%
@@ -332,6 +333,63 @@ It is no longer the only answer to the cache problem, though, and it is no
 longer the first one to reach for. A cap buys cache warmth out of the *ceiling*,
 because proceeding while over the line is exactly what it does. The next section
 buys the same warmth out of headroom you had not spent yet.
+
+### A hold that cannot see ends after 4 minutes
+
+Some holds have no data behind them. The snapshot has no usable bucket; or it is
+too old to trust and the refresh is failing, and it does not show you over the
+line; or every bucket over the line has no reset time to solve against. The hook
+calls that hold *blind*, and it used to last until a usable reading appeared —
+or, through a long `/usage` outage, until the harness killed the hook two days
+later.
+
+Now a blind hold ends after `blind_delay` seconds, default 240, and the call
+goes through. The next tool call refreshes and looks again, and if it is still
+blind, holds up to another 240s. The release is logged as its own reason:
+
+```
+2026-10-10T19:04:11Z release cwd=/home/you/projects/nightly after 240s (blind-release)
+```
+
+4 minutes because the cost worth bounding is the prompt cache, not the wait. A
+hold that outlives the 5-minute TTL makes the next turn re-read its context
+cold, and an agent blind on every call would pay that on every call. Under the
+TTL, an outage degrades to a slow, cache-warm crawl rather than a freeze.
+
+```bash
+niceclaude on ~/projects/nightly --blind-delay 600     # seconds; 0 never holds blind
+niceclaude on ~/projects/nightly --no-blind-delay      # hold until it can see
+```
+
+`--no-blind-delay` writes an explicit `null`, like the other `--no-` flags, so
+it also overrides the default; a blind hold then ends only when a usable reading
+appears, at `max_delay` if one is set, or at the harness timeout.
+
+What it does *not* touch is a hold justified by data. A snapshot that is stale
+but already over the line, with a real reset time, is a floor rather than a guess
+— usage only rises — so that hold is as long as it always was, and only
+`--max-delay` cuts it short. Where both caps are in force the tighter one wins;
+if `max_delay` fires first on a blind hold the release is still logged
+`max_delay-release-WHILE-BLIND`.
+
+The 240s counts from the moment the hold went blind: from the start of the tool
+call if it was blind from the outset, so the refresh the hook tries first is on
+the clock, or from when a justified hold turned blind, and it starts over if
+data justifies the hold again in between. A refresh already running when it
+expires is not
+interrupted, though, and can run past it by up to its own 3-minute timeout.
+
+`niceclaude status` prints the setting beside `band_delay`, and a blind verdict
+says when the call will go through:
+
+```
+  blind_delay   4m00s, then a blind hold lets the call through
+
+right now:      BRAKED, blind -- no usable buckets in snapshot
+                No release to solve for; it re-checks every 15s.
+                blind_delay lets the call through after 4m00s, and the
+                next tool call looks again.
+```
 
 ### Subagents and the 5-minute cache
 
@@ -465,8 +523,8 @@ see whether you still want the cap.
 
 One thing `--band-delay` will not do is release a *blind* agent. A snapshot too
 stale to trust is reported as over the brake line, because "I cannot see" must
-not resolve into "I am comfortably under the line". Only `--max-delay` proceeds
-on data we know we do not have.
+not resolve into "I am comfortably under the line". Only `--blind-delay` and
+`--max-delay` proceed on data we know we do not have.
 
 ### Sizing a band, and the ceiling that limits it
 
@@ -607,7 +665,8 @@ out while it waits.
 The verdict line comes from the hook's own `decide()` rather than a second copy
 of the arithmetic, so `status` cannot report `running` while the hook is holding
 the agent. When the snapshot is too stale to trust, it says `BRAKED, blind` and
-prints no release at all, because there is none to solve for.
+prints no release time, because there is none to solve for; it says instead
+when `blind_delay` will let the call through.
 
 ## Knowing whether it is worth running
 

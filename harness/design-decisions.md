@@ -377,7 +377,8 @@ declare `detect` and read the model per call from the caller's transcript.
 - Unparseable/missing snapshot → **brake** (the tool exists to prevent overspend).
 - Crash inside the hook → **fail open** and log. A bug must never wedge every
   session; problems should surface via `check` and `hook.log`.
-- A long hold → **keep holding.** There is no self-imposed ceiling. `MAX_BRAKE`
+- A long hold → **keep holding**, if data justifies it. There is no
+  self-imposed ceiling on such a hold. `MAX_BRAKE`
   (6h) used to be one, justified as "by then every window has rolled" — false,
   since the weekly and per-model weekly windows run seven days and are precisely
   the ones that bind for days. It also never fired once in 388 logged releases,
@@ -385,7 +386,12 @@ declare `detect` and read the model per call from the caller's transcript.
   and the harness clock starts ~0.2s earlier at spawn. Two ceilings remain, and
   both are deliberate: `max_delay`, which you set per folder, and the registered
   timeout, which is the harness's. A release *while blind* is still logged
-  distinctly, because it is the one release we cannot justify from data.
+  distinctly (`max_delay-release-WHILE-BLIND`, or `blind-release` below),
+  because it is a release we cannot justify from data.
+- A long **blind** hold → **fail free** after `blind_delay` (default 240s),
+  logged `blind-release`. This is the one exception to "keep holding", and it
+  is the user's: never stall forever. A blind hold is one with no release data
+  can justify, so it had no end but the harness timeout; see §22.
 - The registered timeout kills the hook **silently** — the process dies before it
   can log. So an unmatched `brake` in `hook.log` means "timed out", not "hung".
 - **Exception — a freshly rolled window.** After a reset the server omits the
@@ -415,10 +421,13 @@ gives an asymmetric rule:
 Concretely:
 
 - Degraded snapshot already over the line → **brake with full confidence.** It
-  can only have got worse since.
+  can only have got worse since. That holds while its wake is still ahead: a
+  wake at or before now means the window has reset since the reading, which
+  then bounds nothing, and the hold is blind (§22).
 - Degraded snapshot under the line → **brake anyway**, flagged `BLIND`. Being
   under the line according to data known to be out of date is not evidence of
-  headroom.
+  headroom. Braking is not the same as braking forever, though: a blind hold
+  lets the call through after `blind_delay` (§22).
 - Fresh snapshot under the line → allow.
 
 The two brake reasons are logged distinctly (`BLIND: snapshot Ns old and refresh
@@ -561,7 +570,8 @@ Two deliberate choices:
 - **Choosing a window that is absent from the snapshot brakes as `blind`**, it
   does not wave the agent through. If you asked to be paced against the session
   window and no session bucket is reported, the honest answer is "cannot tell",
-  and the fail-safe applies (§11, §12).
+  and the fail-safe applies (§11, §12): a blind hold, which `blind_delay` ends
+  after 240s by default (§22).
 
 `niceclaude status` prints the enforced set and marks the others `ignored`, so
 the display can never disagree with the hook about what is being enforced.
@@ -772,8 +782,8 @@ machinery beyond that.
   hold on Fable and you don't have Fable information, you don't just stop
   and catch fire, you just run free." Without it, every such call in an
   `--enforce model` folder took "no usable buckets in snapshot", uncapped
-  under the default `max_delay`, and froze the organizer until the harness
-  timeout. The case it lets through: a Fable call whose `week:Fable` row is
+  under the default `max_delay` (as it then was; §22 now bounds it), and froze
+  the organizer until the harness timeout. The case it lets through: a Fable call whose `week:Fable` row is
   missing, because the renderer drops a row whose utilization is null, runs
   unpaced. The row was present in 35,330 of 35,330 samples.
 
@@ -845,3 +855,98 @@ this for a few percent of runs on some models) is no longer cut off after
 10 minutes. `status` warns when the key is missing or short. It checks only
 this account's user settings and the shell; project and managed settings
 can still override it.
+
+---
+
+## 22. A blind hold ends after `blind_delay`, and fails free
+
+§11 and §12 together made a blind hold uncapped. With `max_delay` off, the
+default, a hold the hook could not justify from data lasted until a usable
+reading appeared or the harness killed the hook at `HOOK_TIMEOUT`, 48 hours
+later. The user overruled the design that produced that:
+
+> There should never be a stall forever situation. I would rather fail free
+> than stall for forever.
+
+It was not hypothetical: 870 of 11,422 samples in the author's `usage.jsonl`
+carry no buckets at all, and `hook.log` held 41 `BLIND` lines. So a blind hold
+now ends after `blind_delay` seconds and lets the call through, logged
+`blind-release`. The next tool call refreshes and decides afresh, with no
+memory of the last one, and if still blind holds up to `blind_delay` again.
+The full plan is `blind-delay-plan.md` (B1–B6).
+
+**Why 4 minutes.** `DEFAULT_BLIND_DELAY` is 240 because the cost being bounded
+is the prompt cache, not the wait. A hold that outlives the 5-minute TTL makes
+the next turn re-read its whole context cold, and an agent blind on every call
+would pay that on every call, burning budget while doing no work. Under the
+TTL, a long outage degrades to a slow, cache-warm crawl. Longer is opt-in
+(`on --blind-delay`); `--no-blind-delay` writes an explicit `null`, the old
+hold-until-seen behaviour; 0 never holds blind, and a negative value clamps to
+0 rather than to off (`blind_delay_of`). It is resolved like `band_delay`, by
+`off_or_num` through rule, `defaults`, then the constant, so a `policy.json`
+with no key gets 240. That is the behaviour change, and it is intended.
+
+**What counts as blind.** One rule, stated once as THE BLIND RULE in
+`hook.decide` and cited everywhere else:
+
+> A hard hold is blind if and only if no bucket that governs it has a wake
+> strictly in the future that its reading supports.
+
+The governing buckets are the hot ones, plus the banded ones once the hold is
+latched (a descent from over the line is still owed). An unusable bucket, or
+one over the `m0` floor with no reset clause, supports no wake. Nor does a wake
+at or before now: `bucket_pace` clamps every wake to its window's reset, so a
+past one means the window has reset since the reading and the reading bounds
+nothing. That gives three blind holds, `no usable buckets in snapshot`,
+`BLIND: snapshot Ns old and refresh failing`, and a hot hold where every hot
+entry is wake-less. One supported wake anywhere and the hold is not blind,
+however wake-less the rest. A soft (band) hold is never blind.
+
+Rounds 1–4 of the Phase 1 review each found a defect in a classification built
+from staleness and special cases, which is why it became one rule with
+staleness left out of it. **Staleness justifies holding, never proceeding**
+(§12). A stale reading above a line proves the true one is above it too, and
+any wake it gives is finite, so that hold is a real brake and `blind_delay`
+does not touch it; only `max_delay` does. The asymmetry runs the other way in
+the soft-band branch, which is the one place `decide` refuses stale data,
+because a band hold is a kind of proceeding.
+
+**Only a non-blind hold latches.** `run`'s `hard` latch is what carries a hold
+down through the band. A blind hold is hard too, but it never saw the brake
+line, so it has nothing to run down from. Latched, the next pass would let any
+band bucket with a future wake "justify" it as a descent, un-blind it, reset
+the blind clock and hold until that band wake, which on the weekly line is
+hours. A hold that did begin over the line keeps its latch through a later
+blind spell: the descent is still owed.
+
+**The clock is per invocation.** `blind_start` in `run` measures continuous
+blindness within one tool call, so no call costs more than `blind_delay` of
+it. Blind from the first pass, it starts at the start of `run`, so the refresh
+the hook tries first is on the clock; a hold that turns blind mid-way starts it
+at the start of the pass that first saw it; a pass that data justifies resets
+it. Once the allowance is spent, `run` starts no new refresh (except on the
+first pass, whose refresh is what may cure a merely stale snapshot), because
+`refresh_snapshot` is synchronous. One already in flight can still overrun the
+deadline by up to its own 180s timeout. That overrun is accepted, not fixed.
+
+**Caps combine.** `blind_delay`, `max_delay` and `band_delay` are all
+ceilings, and the tightest one in force ends the hold. The nap is bounded by
+the blind deadline as by the others, never below 1s. A tie goes to
+`blind-release`, since "we could not see" is the truer account; when
+`max_delay` falls strictly first, its existing `max_delay-release-WHILE-BLIND`
+label says the same. `status` prints a `blind_delay` line beside `band_delay`,
+and its blind verdict names whichever knob will let the call through.
+
+Rejected:
+
+- *An uncapped blind hold*, the previous design. It is the stall-forever the
+  rule forbids, on an outage the hook can do nothing about, and its only
+  ceiling was the harness's silent kill, which logs nothing.
+- *A cap that also releases holds data justifies*, i.e. `blind_delay` in
+  `max_delay`'s place, or `max_delay` on by default. That proceeds while known
+  to be over the line, which spends the ceiling the tool exists to protect;
+  §11 keeps that opt-in. Bounding only the hold that cannot see keeps every
+  real brake exactly as long as it was.
+- *A blind allowance remembered across calls.* It would need state the hook
+  does not keep, and the next call's refresh is the better test of whether
+  the outage is over.

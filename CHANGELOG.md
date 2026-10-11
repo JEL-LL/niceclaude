@@ -49,6 +49,29 @@ signs of a daemon that was missed.
   too short. The cost: a subagent genuinely stalled on the API is no longer
   cut off after 10 minutes.
 
+- **A blind hold now ends after 4 minutes and lets the call through.** A hold
+  the hook cannot justify from data used to have no ceiling but the harness's
+  48-hour timeout: no usable bucket in the snapshot, a snapshot too old to
+  trust with the refresh failing, or every over-line bucket lacking a reset
+  time to solve against. One `/usage` outage could freeze an agent for two
+  days. Such a hold now ends after `blind_delay` seconds, default 240, logged
+  in `hook.log` as `blind-release`; the next tool call refreshes and looks
+  again. This applies to every paced folder, including existing `policy.json`
+  files that have never heard of the key.
+
+  4 minutes because the cost worth bounding is the prompt cache, not the wait:
+  a hold past the 5-minute TTL makes the next turn re-read its whole context
+  cold, and an agent blind on every call would pay that on every call. Under
+  it, a long outage degrades to a slow, cache-warm crawl rather than a freeze.
+
+  A hold justified by data is untouched — over the line with a wake still ahead,
+  however stale the reading, as long as its window has not reset since.
+  `niceclaude on <dir> --blind-delay N`
+  changes the limit (0 never holds blind), and `--no-blind-delay` restores the
+  old behaviour: hold until a usable reading appears, or until `max_delay` if
+  one is set. `status` prints the `blind_delay` in force and, on a blind
+  verdict, when the call will go through.
+
 - **`niceclaude on` defaults to `--model detect`.** A new rule given no
   `--model` is written as `"model": "detect"`, as is an existing rule that
   has no model yet. A rule that already names a model keeps it, and the hook
