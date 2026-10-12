@@ -803,3 +803,45 @@ frozen agent cannot change model while frozen. The backwards read
 `detect_model` never raises: an exception would fail the hook open.
 `model_tag` adds `model=<family>(detected|declared)` or `model=none` to
 `brake` and `throttle` lines in `hook.log`, so a hold can be explained.
+
+## 21. `install` raises Claude Code's subagent stall watchdog
+
+Claude Code aborts a background subagent that makes no progress for
+`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, 600000 ms by default (GitHub issue
+#85265 reports the same cutoff killing healthy agents). A hold in the
+`SubagentStart` hook is not progress. In `hook.log`, a Fable subagent was
+braked at `SubagentStart` at 02:12:43Z on 2026-09-16, and its transcript ends
+at 02:22:43Z with `Agent stalled: no progress for 600s`, to the second. A
+probe on Claude Code 2.1.296 reproduced it: with the variable at 30000 in a
+settings `env` block, a 75s `SubagentStart` hold killed the agent at 30s, and
+at 150000 the same hold completed. So any hold there longer than the timeout
+loses the agent instead of pacing it.
+
+`install` therefore writes the variable into the account's `settings.json`
+`env` block by default. That is unlike `--subagent-cache-*`, which is opt-in
+because it trades money. This one trades nothing but stall detection, and
+without it, pacing subagents does not work. The value is `HOOK_TIMEOUT` plus
+the default 10 minutes (`STALL_TIMEOUT_MS`, 173400000), so even after the
+longest hold the hook can take, the model keeps its usual allowance to the
+first chunk.
+
+It follows the TTL's round-trip rules (§8). A value the user set is never
+replaced, only warned about if it is shorter than `HOOK_TIMEOUT`. What install
+writes is recorded per settings file in `claude_settings_stall_marker.json`.
+`uninstall` removes the key only while it still matches that record, and
+drops the `env` block if that empties it. A record that matches is replaced by
+a later install, which is how a future release moves its own value. The marker
+is a file of its own so that an older niceclaude still reads the TTL marker
+intact.
+
+`per-account-state-plan.md` §E rejected writing an `env` block for
+`NICECLAUDE_DIR`. Its reasons do not carry over. That variable also had to
+reach the CLI, which never sees a settings `env` block, while this one is
+read only by Claude Code. And "one more key in a file niceclaude does not
+own" is answered by the marker, as it is for the TTL.
+
+Accepted cost: a subagent genuinely stuck on the API (the issue reports
+this for a few percent of runs on some models) is no longer cut off after
+10 minutes. `status` warns when the key is missing or short. It checks only
+this account's user settings and the shell; project and managed settings
+can still override it.

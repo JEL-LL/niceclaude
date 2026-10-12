@@ -233,6 +233,10 @@ POLICY_PATH = os.path.join(ROOT_DIR, "policy.json")
 # Already keyed by settings path, so one file at the root serves every account.
 CLAUDE_SETTINGS_MARKER_PATH = os.path.join(ROOT_DIR,
                                            "claude_settings_marker.json")
+# The same, for the CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS that `install` puts in
+# the settings `env` block: settings file -> the value written there. A file of
+# its own, so a niceclaude that predates it still reads the TTL marker intact.
+STALL_MARKER_PATH = os.path.join(ROOT_DIR, "claude_settings_stall_marker.json")
 # Which config dirs `install` has been run against (written from Phase 4 on).
 REGISTRY_PATH = os.path.join(ROOT_DIR, "accounts.json")
 # Byte-identical for every account -- the hook command and its timeout -- so it

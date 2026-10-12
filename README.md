@@ -127,6 +127,17 @@ overwritten. Running it twice updates in place instead of registering the hook
 twice. `niceclaude uninstall` removes exactly what it added and leaves policy and
 logs alone.
 
+`install` also sets `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` in that file's `env`
+block, to the 48h hook timeout plus 10 minutes. Claude Code kills a background
+subagent that makes no progress for 10 minutes by default, and a hold is not
+progress, so without this a subagent held longer is reported `Agent stalled`
+and lost rather than paced. A value you have set yourself is left alone, with a
+warning if it is too short; the value install writes is recorded in
+`claude_settings_stall_marker.json` in the data directory, and `uninstall`
+removes it only if it is still unchanged. `status` warns when the key is
+missing. The trade: a subagent truly stuck on the API is no longer cut off at
+10 minutes.
+
 `install --subagent-cache-1h` (or `--subagent-cache-5m`) also sets Claude Code's
 `subagentPromptCacheTtl` in that same file, in the same write. It is opt-in:
 without a flag the key is left exactly as found. The value written is recorded in

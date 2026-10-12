@@ -66,7 +66,7 @@ from ._shared import (  # noqa: E402
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
     DEFAULT_POLICY, HOME, HOOK_LOG_PATH, HOOK_TIMEOUT,
     LOG_PATH, POLICY_PATH, REGISTRY_PATH, ROOT_DIR, SETTINGS_PATH,
-    MAX_STALE, STATE_PATH, WINDOW_SECONDS, account_paths, account_slug,
+    MAX_STALE, STALL_MARKER_PATH, STATE_PATH, WINDOW_SECONDS, account_paths, account_slug,
     bucket_pace, model_matches, norm_path, normalize_enforce, off_or_num,
     path_within,
 )
@@ -1336,6 +1336,135 @@ def read_ttl_marker(target):
     return load_ttl_marker().get(_marker_key(target))
 
 
+# --- the subagent stall watchdog ---------------------------------------------
+#
+# Claude Code aborts a background subagent that makes no progress for
+# CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS, 10 minutes by default, and a hold in the
+# SubagentStart hook is not progress. Seen in hook.log: a Fable subagent braked
+# at SubagentStart at 02:12:43Z, and its transcript ends 02:22:43Z with
+# "Agent stalled: no progress for 600s" -- to the second. Any hold there past
+# 10 minutes is a dead agent, not a paced one. So unlike the TTL, `install`
+# sets this by default: without it, pacing a subagent does not work.
+#
+# The value is the longest hold the hook can take (HOOK_TIMEOUT) plus the
+# default allowance, so even after that hold the model still gets the usual 10
+# minutes to its first chunk. The price: a subagent genuinely stalled on the
+# API is noticed after ~48h instead of 10 minutes.
+
+STALL_ENV_KEY = "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"
+STALL_DEFAULT_MS = 600000
+# A string: settings `env` values are copied into the environment as written.
+STALL_TIMEOUT_MS = str(HOOK_TIMEOUT * 1000 + STALL_DEFAULT_MS)
+
+
+def _ms(value):
+    """A stall timeout as an int, or None when it is not a whole number."""
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def splice_stall_timeout(cfg, ours):
+    """Set STALL_ENV_KEY in `cfg`'s env block, in place, where that is ours.
+
+    Returns (changed, claim, line). `ours` is the value the marker says
+    niceclaude wrote into this file, or None. `claim` says whether the value
+    now there is niceclaude's, for the marker; `line` is what install prints.
+
+    A value the user set is never replaced, even a short one: it is warned
+    about instead. A value that matches our record is replaced, which is how a
+    later release moves its own setting.
+    """
+    env = cfg.get("env")
+    if env is not None and not isinstance(env, dict):
+        return False, False, (f"warning: `env` is not an object, so "
+                              f"{STALL_ENV_KEY} was not set")
+    current = (env or {}).get(STALL_ENV_KEY)
+    if current == STALL_TIMEOUT_MS:
+        return False, ours == STALL_TIMEOUT_MS, (
+            f"{STALL_ENV_KEY} = {STALL_TIMEOUT_MS}  (already set)")
+    if current is None or current == ours:
+        was = "unset" if current is None else json.dumps(current)
+        cfg.setdefault("env", {})[STALL_ENV_KEY] = STALL_TIMEOUT_MS
+        return True, True, f"{STALL_ENV_KEY} = {STALL_TIMEOUT_MS}  (was {was})"
+    ms = _ms(current)
+    if ms is not None and ms >= HOOK_TIMEOUT * 1000:
+        return False, False, (f"{STALL_ENV_KEY} = {current}  (yours; outlasts "
+                              f"any hold, left alone)")
+    return False, False, (
+        f"warning: {STALL_ENV_KEY} is {json.dumps(current)}, set by you, not "
+        f"niceclaude.\n          A subagent held longer than that is killed "
+        f"as stalled. Remove it\n          and rerun install, or raise it to "
+        f"{STALL_TIMEOUT_MS}.")
+
+
+def release_stall_timeout(cfg, written, where):
+    """Remove STALL_ENV_KEY from `cfg` if it is still the value niceclaude
+    wrote, and the env block with it if that leaves it empty. Returns
+    (changed, message-or-None), as release_subagent_ttl does."""
+    env = cfg.get("env")
+    if not isinstance(env, dict) or STALL_ENV_KEY not in env:
+        return False, None
+    current = env[STALL_ENV_KEY]
+    if written is not None and current == written:
+        del env[STALL_ENV_KEY]
+        if not env:
+            del cfg["env"]
+        return True, f"removed {STALL_ENV_KEY} ({written}) from {where}"
+    if written is None:
+        return False, (f"left {STALL_ENV_KEY} ({json.dumps(current)}) in "
+                       f"{where}: niceclaude did not set it")
+    return False, (f"left {STALL_ENV_KEY} in {where}: it is now "
+                   f"{json.dumps(current)}, not the {written} niceclaude wrote")
+
+
+def load_stall_marker():
+    """The stall marker as a map of settings file -> the value written there."""
+    marker = hook.load_json(STALL_MARKER_PATH, {})
+    if not isinstance(marker, dict):
+        return {}
+    return {_marker_key(k): v for k, v in marker.items()
+            if isinstance(k, str) and isinstance(v, str)}
+
+
+def save_stall_marker(marker):
+    """Write the marker map, or remove the file once nothing is recorded."""
+    if marker:
+        write_atomic(STALL_MARKER_PATH, json.dumps(marker, indent=2))
+    else:
+        try:
+            os.remove(STALL_MARKER_PATH)
+        except OSError:
+            pass
+
+
+def stall_timeout_problem(target, env=None):
+    """Why subagents in this account would be killed mid-hold, or None.
+
+    The settings `env` block beats the shell, so it is read first. Only this
+    account's user settings and the shell are seen; a project or managed
+    settings file can still change the answer.
+    """
+    env = os.environ if env is None else env
+    cfg, err = load_settings(target)
+    block = (cfg or {}).get("env") if err is None else None
+    if isinstance(block, dict) and STALL_ENV_KEY in block:
+        value, source = block[STALL_ENV_KEY], target
+    elif STALL_ENV_KEY in env:
+        value, source = env[STALL_ENV_KEY], "this shell"
+    else:
+        return (f"{STALL_ENV_KEY} is unset, so a subagent held over 10 "
+                f"minutes\n                is killed as stalled. Run: "
+                f"niceclaude install")
+    ms = _ms(value)
+    if ms is not None and ms >= HOOK_TIMEOUT * 1000:
+        return None
+    return (f"{STALL_ENV_KEY} is {json.dumps(value)} (from {source}),\n"
+            f"                so a subagent held longer than that is killed "
+            f"as stalled")
+
+
 # --- the account registry ----------------------------------------------------
 #
 # Which config dirs `install` has been run against, so `status` in any one
@@ -1509,8 +1638,20 @@ def cmd_install(force, subagent_ttl=None):
         else:
             ttl_line = f"{SUBAGENT_TTL_KEY} = {subagent_ttl}  (already set)"
 
-    if changed or ttl_changed:
+    stall_changed, stall_claim, stall_line = splice_stall_timeout(
+        cfg, load_stall_marker().get(_marker_key(target)))
+
+    if changed or ttl_changed or stall_changed:
         write_atomic(target, json.dumps(cfg, indent=2) + "\n")
+    # Recorded after the write, like the TTL marker; and dropped when the
+    # value there is not ours, since a stale record would let uninstall take
+    # a value the user has since put back by hand.
+    stall_marker = load_stall_marker()
+    if stall_claim:
+        stall_marker[_marker_key(target)] = STALL_TIMEOUT_MS
+    else:
+        stall_marker.pop(_marker_key(target), None)
+    save_stall_marker(stall_marker)
     # After the settings write, so a failure between the two leaves no marker
     # claiming a value that never landed. A value that was already there and
     # not ours is NOT claimed: uninstall would then take back the user's own
@@ -1526,6 +1667,7 @@ def cmd_install(force, subagent_ttl=None):
           f"{'' if changed else '  (already registered)'}")
     if ttl_line:
         print(f"          {ttl_line}")
+    print(f"          {stall_line}")
     print(f"fragment: {SETTINGS_PATH}  (optional, for --settings)")
     print(f"policy:   {POLICY_PATH}")
     if force:
@@ -1566,13 +1708,20 @@ def cmd_uninstall():
     # no longer stands once this file is rewritten or found edited.
     written = read_ttl_marker(target)
     ttl_changed, ttl_msg = release_subagent_ttl(cfg, written, target)
-    if unhooked or ttl_changed:
+    stall_marker = load_stall_marker()
+    stall_written = stall_marker.get(_marker_key(target))
+    stall_changed, stall_msg = release_stall_timeout(cfg, stall_written,
+                                                     target)
+    if unhooked or ttl_changed or stall_changed:
         write_atomic(target, json.dumps(cfg, indent=2) + "\n")
     if written is not None:
         # This file's entry only: another config dir's record still stands.
         marker = load_ttl_marker()
         marker.pop(_marker_key(target), None)
         save_ttl_marker(marker)
+    if stall_written is not None:
+        stall_marker.pop(_marker_key(target), None)
+        save_stall_marker(stall_marker)
 
     if unhooked:
         print(f"removed the hook from {target}")
@@ -1580,6 +1729,8 @@ def cmd_uninstall():
         print(f"no niceclaude hook registered in {target}")
     if ttl_msg:
         print(ttl_msg)
+    if stall_msg:
+        print(stall_msg)
     # Kept, with hook false, rather than dropped: the entry is the only record
     # of this config dir, and `status` then shows the account as uninstalled
     # on purpose instead of nagging about a hook that is meant to be gone.
@@ -1903,6 +2054,9 @@ def describe_installation():
                 "                started from here is not paced at all")
     target = claude_settings_path()
     if registered_in(target):
+        problem = stall_timeout_problem(target)
+        if problem:
+            return f"registered in {target}\n  WARNING:      {problem}"
         return f"registered in {target}"
     if registered_in(SETTINGS_PATH):
         return (f"fragment only -- reaches only sessions started with\n"
@@ -2716,6 +2870,14 @@ Install is per account: it registers the hook in the settings.json of the
 config dir CLAUDE_CONFIG_DIR names, and nowhere else, so run it once from each
 account's environment. Each run records that account in accounts.json in the
 data directory, which is how `status` lists every account from any of them.
+
+It also sets CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS in that file's env block, to
+the longest hold the hook can take plus 10 minutes. Claude Code otherwise
+kills a background subagent after 10 minutes without progress, and a hold is
+not progress, so a subagent held longer would be killed instead of paced. A
+value you set yourself is left alone, with a warning if it is too short. What
+install writes is recorded in claude_settings_stall_marker.json in the data
+directory, so `uninstall` takes back that and nothing else.
 
 --subagent-cache-1h or --subagent-cache-5m also sets subagentPromptCacheTtl in
 the same file. Subagents (and workflows, teammates, compaction) get a 5-minute

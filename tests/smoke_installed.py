@@ -116,6 +116,10 @@ def main():
     check("unrelated settings survived the merge",
           cfg.get("model") == "sonnet"
           and cfg["hooks"]["Stop"][0]["hooks"][0]["command"] == "echo done")
+    # Without it Claude Code kills a subagent held over 10 minutes.
+    check("install raised the subagent stall timeout",
+          "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS" in (cfg.get("env") or {}),
+          str(cfg.get("env")))
 
     if ours:
         bare = ours[0].strip('"')

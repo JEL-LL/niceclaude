@@ -86,6 +86,7 @@ def old_config_dir(env, home):
 
 CONSTANTS = ("ROOT_DIR", "ACCOUNT_KEY", "DATA_DIR", "LOG_PATH", "STATE_PATH",
              "HOOK_LOG_PATH", "POLICY_PATH", "CLAUDE_SETTINGS_MARKER_PATH",
+             "STALL_MARKER_PATH",
              "REGISTRY_PATH", "SETTINGS_PATH")
 
 
@@ -125,6 +126,8 @@ def test_default_account_keeps_the_legacy_paths(tmp_path, config_dir):
     assert got["POLICY_PATH"] == os.path.join(legacy, "policy.json")
     assert got["CLAUDE_SETTINGS_MARKER_PATH"] == os.path.join(
         legacy, "claude_settings_marker.json")
+    assert got["STALL_MARKER_PATH"] == os.path.join(
+        legacy, "claude_settings_stall_marker.json")
     assert got["PID_PATH"] == os.path.join(legacy, "daemon.pid")
     assert got["SETTINGS_PATH"] == os.path.join(
         old_config_dir(env, str(home)), "settings.json")
@@ -309,14 +312,18 @@ def test_shared_files_do_not_move_with_the_account(tmp_path):
              {"CLAUDE_CONFIG_DIR": str(tmp_path / "b")}]
     shared = {json.dumps([c[k] for k in ("ROOT_DIR", "POLICY_PATH",
                                          "CLAUDE_SETTINGS_MARKER_PATH",
-                                         "REGISTRY_PATH", "SETTINGS_PATH")])
+                                         "REGISTRY_PATH", "SETTINGS_PATH",
+                                         "STALL_MARKER_PATH")])
               for c in (child_constants(home_env(tmp_path, **e)) for e in cases)}
     assert len(shared) == 1
     root = old_data_dir(home_env(tmp_path), str(home))
-    assert json.loads(shared.pop())[1:4] == [
+    got = json.loads(shared.pop())
+    assert got[1:4] == [
         os.path.join(root, "policy.json"),
         os.path.join(root, "claude_settings_marker.json"),
         os.path.join(root, "accounts.json")]
+    assert got[-1] == os.path.join(
+        root, "claude_settings_stall_marker.json")
 
 
 # --- pidfiles -------------------------------------------------------------------

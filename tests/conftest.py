@@ -58,3 +58,6 @@ def _default_account(request, monkeypatch, tmp_path):
         for mod in (_shared, hook, cli):
             monkeypatch.setattr(mod, "ACCOUNT_KEY", "")
     monkeypatch.setattr(cli, "REGISTRY_PATH", str(tmp_path / "accounts.json"))
+    # Every install writes the stall marker, so it is pinned the same way.
+    monkeypatch.setattr(cli, "STALL_MARKER_PATH",
+                        str(tmp_path / "claude_settings_stall_marker.json"))

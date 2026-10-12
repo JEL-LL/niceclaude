@@ -66,6 +66,8 @@ def test_install_preserves_every_unrelated_key(settings):
 
     assert cli.cmd_install(force=False) == 0
     cfg = read(settings)
+    # The env block is shared: install adds its stall timeout beside FOO.
+    cfg["env"].pop(cli.STALL_ENV_KEY)
     for key, value in original.items():
         assert cfg[key] == value, key
     assert commands(cfg) == [HOOK]

@@ -34,6 +34,21 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **`install` raises Claude Code's subagent stall watchdog. Rerun
+  `niceclaude install` in each account after upgrading.** Claude Code kills a
+  background subagent after 10 minutes without progress
+  (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, default `600000`), and a hold in the
+  hook is not progress. A subagent braked longer than that was reported
+  `failed: Agent stalled: no progress for 600s` instead of being paced: one
+  was killed 600s to the second after its `SubagentStart` hold began.
+  `install` now writes `"CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "173400000"`
+  (the 48h hook timeout plus 10 minutes) into the `env` block of the
+  account's `settings.json`. A value you set yourself is kept, with a warning
+  if it is shorter than a hold can be. `uninstall` removes the key only if it
+  still holds what install wrote. `status` warns when the key is missing or
+  too short. The cost: a subagent genuinely stalled on the API is no longer
+  cut off after 10 minutes.
+
 - **`niceclaude on` defaults to `--model detect`.** A new rule given no
   `--model` is written as `"model": "detect"`, as is an existing rule that
   has no model yet. A rule that already names a model keeps it, and the hook
