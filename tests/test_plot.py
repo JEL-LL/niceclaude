@@ -17,6 +17,7 @@ without one.
 """
 
 import argparse
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -332,6 +333,31 @@ def test_a_figure_with_a_band_renders(tmp_path):
     out = tmp_path / "band.png"
     assert render(series, str(out), 5, 8, 3) == 0
     assert out.stat().st_size > 0
+
+
+def test_the_written_path_is_printed_absolute(tmp_path, monkeypatch, capsys):
+    """`wrote ...` names a path you can act on from anywhere.
+
+    `--out` defaults to a bare filename, so the obvious implementation prints
+    back whatever relative string it was handed -- true, and worthless to a
+    reader who is not in the directory the command ran from, which is the
+    whole reason the line exists. The assertion is on `os.path.isabs` rather
+    than on a literal, since the point is the property and not one platform's
+    spelling of it; the explicit relative input is what makes it bite.
+    """
+    pytest.importorskip("matplotlib")
+    records = [record(RAW, ts_epoch=1789000000 + i * 3600) for i in range(6)]
+    series = collect(records, cli.parse_usage)
+    monkeypatch.chdir(tmp_path)
+    assert render(series, "relative.png", 5, 8, 3) == 0
+    wrote = [ln for ln in capsys.readouterr().out.splitlines()
+             if ln.startswith("wrote ")][0]
+    printed = wrote[len("wrote "):]
+    assert os.path.isabs(printed), printed
+    assert os.path.basename(printed) == "relative.png"
+    # The file really is where the line says it is -- an absolute path built
+    # from the wrong base would satisfy isabs and still send a reader nowhere.
+    assert os.path.exists(printed)
 
 
 # --- the line the figure defaults to -----------------------------------------

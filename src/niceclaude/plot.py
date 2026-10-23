@@ -427,7 +427,17 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1, band=DEFAULT_BAND):
         color=INK, fontsize=14, fontweight="bold", x=0.012, ha="left", y=0.995)
     fig.subplots_adjust(left=0.075, right=0.985, top=0.935, bottom=0.075)
     fig.savefig(out_path, dpi=150, facecolor=SURFACE)
-    print(f"wrote {out_path}")
+    # Absolute, because the point of printing it is that it can be used: pasted
+    # into a browser, or clicked in a terminal that linkifies paths. `--out`
+    # defaults to a bare filename and is usually given relative, so what was
+    # printed before was `niceclaude-usage.png` -- true, and useless to anyone
+    # not standing in the directory the command happened to run from.
+    #
+    # abspath rather than realpath: this is the path the user asked for, made
+    # usable. realpath would resolve symlinks along the way and hand back
+    # somewhere they never named, which is a different file reference even when
+    # it is the same bytes.
+    print(f"wrote {os.path.abspath(out_path)}")
     for key, (over, in_band, total, idle, worst) in stats.items():
         pc = 100.0 * over / total if total else 0.0
         throttled = f"{in_band}/{total} in the band, " if band else ""

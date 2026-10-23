@@ -541,7 +541,16 @@ lags its own `ts_epoch` by more than `RESET_JITTER` now returns None from
 
 ---
 
-## 19. `plot` prints the path it was given, not the resolved absolute path — OPEN
+## 19. ~~Sighting: `plot` prints the path it was given, not the resolved absolute path~~ — FIXED
+
+**Fixed 2026-10-23.** `render` prints `os.path.abspath(out_path)`. `abspath`
+rather than `realpath`: this is the path the user asked for, made usable, and
+resolving symlinks would hand back somewhere they never named. Pinned by
+`test_the_written_path_is_printed_absolute`, which renders to a relative name
+from a chdir'd temp directory and asserts the printed string is absolute, ends
+in that name, and exists -- an absolute path built from the wrong base would
+satisfy the first check and still send a reader nowhere. The original entry
+follows.
 
 Filed 2026-10-23, from the author. `niceclaude plot` prints `wrote
 <out_path>` with the path exactly as given, and the default is the bare

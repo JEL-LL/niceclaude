@@ -34,6 +34,12 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **`plot` prints the absolute path it wrote**, rather than the argument it
+  was given -- which defaults to the bare `niceclaude-usage.png` and so named
+  nothing usable from anywhere but the directory the command ran in. The line
+  can now be pasted into a browser or clicked in a terminal that linkifies
+  paths.
+
 - **A corrupt `state.json` no longer silently unpaces the folder.** A
   `window_seconds` of `0`, or a quoted `"18000"`, or a quoted percentage, made
   the pace arithmetic raise. Every exception in the hook lands in its
