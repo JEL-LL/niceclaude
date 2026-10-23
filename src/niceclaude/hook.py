@@ -348,7 +348,27 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
            caller_model=None):
     """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..,
     'chunk':..,'max_delay':..,'band_delay':..,'blind_delay':..,'region':..,
-    'hold':..}.
+    'hold':..,'expired':..}.
+
+    'expired' says at least one ENFORCED bucket's window has rolled since the
+    snapshot was taken, so its reading is void. `run` reads it to force one
+    refresh: an expired reading voids CONTENT without aging the FILE, so the
+    freshness gate there cannot otherwise see it. In practice only the hot
+    branch can report it True, because an expired bucket is always hot
+    (bucket_pace returns it as `over` with no wake, and the loop below files
+    it accordingly).
+
+    It is nonetheless present on EVERY paced verdict, False included, and the
+    distinction from 'wake_at' and 'reason' -- which are legitimately absent
+    when nothing brakes -- is worth keeping rather than tidying away. Those
+    two are facts about a hold, and with no hold there is no fact. 'expired'
+    is a property of the SNAPSHOT, and a snapshot always has an answer to it.
+    The same argument bucket_pace's own return shape is built on applies here:
+    hook.main catches every exception and fails open, so one consumer reading
+    d["expired"] on a branch that omitted it would not misreport a verdict, it
+    would stop pacing the folder. The unpaced early-out above is the one
+    exception, and it is not a verdict at all -- it carries no region, chunk
+    or blind_delay either, and every caller tests `paced` first.
 
     'region' is geometric -- 'free', 'band' or 'over' -- and is reported even
     when nothing brakes, because `run` uses it to decide how fresh the snapshot
@@ -483,14 +503,14 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
                 "blind_delay": blind_delay,
-                "region": "free", "blind": False}
+                "region": "free", "blind": False, "expired": False}
     if not enforced:
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": now + chunk,
                 "reason": "no usable buckets in snapshot", "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
                 "blind_delay": blind_delay,
-                "region": "over", "blind": True}
+                "region": "over", "blind": True, "expired": False}
 
     # Kept apart, because the two demand different things. An `over` bucket
     # demands a hold until ITS throttle line catches up, which can be hours. A
@@ -502,6 +522,9 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # which point the harness kills it and the agent proceeds UNPACED.
     hot = []
     banded = []
+    # Does any enforced bucket describe a window that has already rolled? Only
+    # `run` reads this, and only to force a refresh (E6, below).
+    expired = False
     for key, b in enforced:
         # The pace-line arithmetic lives in _shared so `status` can report the
         # same numbers this brakes on, rather than a second implementation of
@@ -515,6 +538,26 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
             # look, and on a wake at or before `now` (see the over-line case).
             # A hot hold with no real wake anywhere is blind.
             hot.append((key, f"{key}: unusable", now + chunk, False))
+            continue
+        if p["expired"]:
+            # The window rolled since this reading was taken, so the reading
+            # bounds nothing in the window now running: not a lower bound on
+            # usage (the window was zeroed) and not evidence of headroom (the
+            # new window is unobserved). Re-checked on the chunk, and marked
+            # unsupported in the fourth field, so THE BLIND RULE below calls
+            # the resulting hold what it is -- blind, which is already this
+            # codebase's answer to "cannot see".
+            #
+            # Handled here, FIRST and explicitly, rather than left to the
+            # wake-less arm below that bucket_pace's forced `over` region
+            # would otherwise route it into. That arm would log "session 95%
+            # over floor 5%", which is simply false -- the bucket is not over
+            # any floor, its window is gone -- and hook.log is read by eye.
+            # Being first also means this does not depend on that forced
+            # region staying forced.
+            expired = True
+            hot.append((key, f"{key}: window reset since this reading",
+                        now + chunk, False))
             continue
         if p["region"] == "free":
             continue
@@ -535,6 +578,15 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
             # wake one to aim at: as wake_at it would make `run` nap the 1s
             # floor for the whole hold, so re-check on the chunk instead, as
             # every other wake-less entry does.
+            #
+            # Kept, and deliberately, now that the expired arm above catches
+            # the gross case. What still reaches here is the jitter zone: a
+            # reading inside RESET_JITTER of its own reset is NOT voided (the
+            # server rounds the times it prints, so that window may well still
+            # be running), its elapsed is clamped to 1.0, and its wake then
+            # solves at or before the reset it is clamped to. This is also the
+            # guard that would catch a future regression in that boundary, and
+            # it costs one comparison.
             real = p["wake"] > now
             hot.append((key, f"{key} {p['pct']}% over line {p['allowed']:.1f}%",
                         p["wake"] if real else now + chunk, real))
@@ -555,11 +607,22 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     #   wake strictly in the future that its reading supports.
     #
     # The governing buckets are the hot entries, plus the banded entries once
-    # `hard` is latched (a descent from over the line is still owed). A wake
-    # at or before `now` is not supported: bucket_pace clamps every wake to
-    # its window's reset, so a past one means the window has reset since the
-    # reading and the reading bounds nothing. A wake-less entry -- unusable,
-    # or over the floor with no reset clause -- supports nothing.
+    # `hard` is latched (a descent from over the line is still owed). A
+    # wake-less entry supports nothing, and there are now three kinds:
+    # unusable, over the m0 floor with no reset clause, and EXPIRED -- the
+    # window rolled under the reading, so it bounds nothing in the window now
+    # running. The expired arm above files that one.
+    #
+    # A wake at or before `now` is not supported either, and note what it now
+    # means. It used to mean "the window has reset since the reading", but a
+    # window that has reset is voided to expired above and publishes no wake
+    # at all. What is left is the JITTER ZONE: a reading within RESET_JITTER
+    # of its own printed reset, kept on purpose because the server rounds
+    # those times and the window may well still be running. Its elapsed is
+    # clamped to 1.0, so its wake solves to the reset just behind us. We
+    # cannot see past that roll either, so it supports nothing -- but it is a
+    # different fact about a different reading, and a future change to the
+    # boundary would change which readings land here.
     #
     # Staleness does NOT enter into it. A stale pct is a lower bound (usage
     # only rises within a window), so a stale reading above a line proves the
@@ -585,7 +648,7 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
                 "reason": "; ".join(h[1] for h in hot + banded),
                 "chunk": chunk, "max_delay": max_delay,
                 "band_delay": band_delay, "blind_delay": blind_delay,
-                "region": region, "blind": not seen}
+                "region": region, "blind": not seen, "expired": expired}
 
     # A hold that began above the brake line does not end at it.
     #
@@ -611,8 +674,8 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
                 "wake_at": max(h[2] for h in banded),
                 "reason": "; ".join(h[1] for h in banded) + " [running down]",
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay,
-                "blind_delay": blind_delay, "region": region, "blind": False}
+                "band_delay": band_delay, "blind_delay": blind_delay,
+                "region": region, "blind": False, "expired": expired}
 
     # Two ways a band stops being a reason to hold.
     #
@@ -630,12 +693,47 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # belongs to max_delay (opt-in) and blind_delay (bounded, and logged as a
     # blind-release) alone.
     if banded and band_delay is not None and not degraded:
+        # A band wake can be in the PAST, and this is the only arm with no
+        # guard against publishing one. Inside the jitter zone a reading is
+        # kept rather than voided, takes the elapsed clamp, and then solves
+        # its release to the reset just behind us -- `band` implies pess >
+        # low, which past the clamp means the solve runs beyond the window and
+        # is clipped back to `resets`. Unguarded, `run` computed
+        # `nap = min(chunk, max(1.0, wake_at - now))`, took the 1s floor, and
+        # spun ~180 passes at a second apiece -- re-reading policy.json and
+        # state.json on every one -- for a hold whose length band_delay had
+        # already fixed. Churn rather than a wrong hold, but it is what plan
+        # section 1.3 was written to remove, and it is reachable for 120s
+        # after EVERY roll.
+        #
+        # CONDITIONAL, mirroring the hot arm's `real`, and that matters: a
+        # band wake only a few seconds out is ordinary, not pathological. The
+        # session line rises about a point every 207s, so a crossing inside
+        # the default 15s chunk is common, and flooring it unconditionally
+        # would round every one of those up to a full chunk -- releasing late
+        # by up to chunk, where the unguarded code at least timed them
+        # exactly.
+        #
+        # Note what the substitute IS, because `status` is handed it too: a
+        # re-check time, not a crossing. Its band branch would otherwise
+        # print it as "full speed resumes in 15s, when the throttle line
+        # catches up", which in the jitter zone is a confident falsehood --
+        # that line cannot catch up, band_delay is what releases the hold.
+        # cmd_status has its own guard for exactly this case; keep the two
+        # together if either moves.
+        #
+        # Replaced HERE and not in the `banded` tuples, deliberately:
+        # `supported` above reads that same field, and rewriting it to a
+        # synthetic future wake would un-blind a latched descent and route it
+        # into the uncapped running-down branch. If those entries ever do need
+        # a different wake, they need a fourth `real` field as `hot` has.
+        band_wake = max(h[2] for h in banded)
         return {"paced": True, "braked": True, "hold": "soft",
-                "wake_at": max(h[2] for h in banded),
+                "wake_at": band_wake if band_wake > now else now + chunk,
                 "reason": "; ".join(h[1] for h in banded),
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay,
-                "blind_delay": blind_delay, "region": region, "blind": False}
+                "band_delay": band_delay, "blind_delay": blind_delay,
+                "region": region, "blind": False, "expired": expired}
 
     if degraded:
         # Under the line according to data we know to be out of date. That is
@@ -652,12 +750,13 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
                 "wake_at": now + chunk,
                 "reason": f"BLIND: snapshot {age}s old and refresh failing",
                 "chunk": chunk, "max_delay": max_delay,
-                "band_delay": band_delay,
-                "blind_delay": blind_delay, "region": "over", "blind": True}
+                "band_delay": band_delay, "blind_delay": blind_delay,
+                "region": "over", "blind": True, "expired": expired}
 
     return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
             "max_delay": max_delay, "band_delay": band_delay,
-            "blind_delay": blind_delay, "region": region, "blind": False}
+            "blind_delay": blind_delay, "region": region, "blind": False,
+            "expired": expired}
 
 
 # Backoff for refresh attempts. If /usage is unreachable -- network down, auth
@@ -783,7 +882,34 @@ def run(cwd, event=None, payload=None):
         spent = (clock is not None and pre_blind
                  and d.get("blind_delay") is not None
                  and now >= clock + d["blind_delay"])
-        if (age is None or age > limit) and now >= next_try and not spent:
+        # An expired reading forces a refresh whatever the file's age says.
+        # It voids CONTENT without aging the FILE, so the freshness gate
+        # cannot see it: `limit` only tightens to NEAR_STALE once the region
+        # is already band or over, and a snapshot younger than that is never
+        # re-read at all. So a snapshot under NEAR_STALE old that straddles
+        # the roll stalls at the exact moment a fresh window became
+        # available, for a full blind_delay, where a ~2s refresh would have
+        # cured it -- what the refresh reaches is the post-roll sample's
+        # MISSING reset clause, which bucket_pace already judges against the
+        # m0 floor.
+        #
+        # One attempt, and only one, whether it succeeds or fails: `first` is
+        # cleared immediately after this block, so a forced refresh that fails
+        # gets no retry from the force. Later passes fall back to the ordinary
+        # `age > limit` gate -- `limit` is MAX_STALE once `first` is False --
+        # and to the next_try backoff. That is the intended division of
+        # labour: the force exists to look ONCE at the moment the content went
+        # void, and chasing an unreachable `/usage` every chunk is exactly
+        # what the backoff exists to prevent.
+        #
+        # Gated on `first`, and that gate is load-bearing: a successful
+        # refresh sets next_try back to 0, so an ungated force would re-run a
+        # ~2s subprocess on every chunk for as long as the window stayed
+        # expired. One refresh per invocation is the guarantee the rest of
+        # this block already makes, and it remains the right one -- every
+        # completed step is followed by a fresh invocation.
+        if ((age is None or age > limit or (first and d.get("expired")))
+                and now >= next_try and not spent):
             if refresh_snapshot():
                 fails = 0
                 next_try = 0.0

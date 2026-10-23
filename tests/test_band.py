@@ -306,12 +306,21 @@ def test_every_return_shape_carries_the_region_and_both_lines():
     omitted one would not fail here in the arithmetic -- it would fail much
     later, as a KeyError inside a hook that is meant never to wedge a session.
     """
+    # `expired` is on every shape, live ones included, which is what lets
+    # test_niceclaude.py assert that the voided shape and a live one carry the
+    # SAME key set rather than merely overlapping ones.
     keys = {"pct", "pess", "allowed", "low", "elapsed", "region", "over",
-            "wait", "wake"}
+            "wait", "wake", "expired"}
+    # All five returns, the voided one included. Its totality is the one the
+    # expired-window plan calls load-bearing: hook.main catches every
+    # exception and fails open, so a key missing THERE would not void one
+    # reading, it would stop pacing the folder.
     for p in (bucket_pace(session_bucket(FREE_PCT), HALFWAY, M0, M1, BAND),
               bucket_pace(session_bucket(BAND_PCT), HALFWAY, M0, M1, BAND),
               bucket_pace(session_bucket(HOT_PCT), HALFWAY, M0, M1, BAND),
-              bucket_pace(floating_bucket(HOT_PCT), HALFWAY, M0, M1, BAND)):
+              bucket_pace(floating_bucket(HOT_PCT), HALFWAY, M0, M1, BAND),
+              bucket_pace(session_bucket(HOT_PCT), RESETS + 3600,
+                          M0, M1, BAND)):
         assert set(p) == keys
 
 

@@ -367,6 +367,33 @@ NEAR_STALE = 15
 # blind_delay (above) is a ceiling too, but only on a hold that cannot see. A
 # hold justified by data still has none of its own.
 
+# How far past a printed reset time a reading may still be describing a LIVE
+# window. The server rounds the times it renders -- 8:09pm and 8:10pm are the
+# same instant -- so a window in its final minute can read as already past its
+# own reset while it is still running. Beyond this slack it has genuinely
+# rolled.
+#
+# One copy because the CAUSE is one -- the rounding above -- not because the
+# three readers are coupled. They are not, and the difference matters to
+# anyone who moves the number. bucket_pace uses it as a ONE-SIDED slack past a
+# single printed reset: how late a reading may be and still describe a live
+# window. plot._segments and cli.cmd_check use it as a SYMMETRIC identity
+# tolerance on the gap between two consecutive reset clauses
+# (`abs(reset - prev_reset) > RESET_JITTER`): are these two samples talking
+# about the same window?
+#
+# So raising it to absorb coarser server rounding costs something in both of
+# those, by one mechanism: a real roll whose clause moved by less than the new
+# threshold stops counting as a roll. In _segments the trace is then drawn
+# straight across it, implying a fall in usage that never happened. In
+# cmd_check `rolled` is what SUPPRESSES the usage-decreased warning, so that
+# roll's legitimate drop gets reported as a likely misparse -- the check fires
+# MORE, not less. Read all three before changing it.
+#
+# It had been two independent copies, in cli and in plot, which is the same
+# disease bucket_pace itself was centralised to cure.
+RESET_JITTER = 120
+
 WINDOW_SECONDS = {"session": 5 * 3600, "week": 7 * 86400}
 
 DEFAULT_POLICY = {
@@ -536,7 +563,8 @@ def bucket_pace(bucket, now, m0, m1, band=0):
     The hook and `status` both need this arithmetic, and a second copy of it is
     how they would begin to disagree -- the same reason `path_within` is shared.
 
-    Returns None for a bucket carrying no percentage. Otherwise a dict:
+    Returns None for a bucket carrying no usable percentage -- missing, or a
+    value arithmetic cannot use (see the first guard below). Otherwise a dict:
 
         pct      as reported by /usage
         pess     pct + 1. /usage reports whole percents, so a reported P could
@@ -544,10 +572,15 @@ def bucket_pace(bucket, now, m0, m1, band=0):
         allowed  the brake line's height right now, in percent
         low      the throttle line's height right now, `band` below the brake
                  line but never below m0 (see below)
-        elapsed  fraction of the window elapsed, or None when the snapshot
+        elapsed  fraction of the window elapsed, never above 1.0, or None
+                 when there is no window in progress to measure: the snapshot
                  carries no reset clause -- which is what a freshly rolled
-                 window looks like. allowed() never dips below m0, so m0 is the
-                 safe floor to judge against until the clause reappears.
+                 window looks like -- or the window has expired. allowed()
+                 never dips below m0, so m0 is the safe floor to judge against
+                 until the clause reappears.
+        expired  has the window rolled since this reading was taken? True
+                 voids the reading entirely; see the branch below for what the
+                 rest of the shape then means, which is NOT a position.
         region   'free' under the throttle line, 'band' between the lines,
                  'over' above the brake line
         over     is `pess` above the BRAKE line, i.e. region == 'over'. Kept
@@ -559,6 +592,10 @@ def bucket_pace(bucket, now, m0, m1, band=0):
         wake     the epoch that wait counts down to, clamped to the window's own
                  reset, which zeroes usage anyway
 
+    Every one of those keys is present on every shape this returns, expired
+    or not, so no consumer can be surprised by a missing one. See the expired
+    branch for why that totality is load-bearing rather than merely tidy.
+
     The throttle line is floored at m0 rather than allowed to sink below it.
     m0 exists so that a fresh window is startable at all -- the pure diagonal
     permits 0% at 0% elapsed -- and throttling the first step out of a window
@@ -567,7 +604,19 @@ def bucket_pace(bucket, now, m0, m1, band=0):
     above m0, and before that the grubstake is free at full speed.
     """
     pct = bucket.get("pct")
-    if pct is None:
+    if not isinstance(pct, (int, float)):
+        # None is the documented "no percentage" case. The rest of the test
+        # is the same fail-open guard as `placed` below: pct is read back out
+        # of state.json unvalidated, and a quoted "50" raised TypeError at
+        # `pess = pct + 1` -- which hook.main catches, logs `-- failing
+        # open`, and turns into a folder that is silently not paced at all.
+        # A pct that arithmetic cannot use IS a bucket carrying no
+        # percentage, so it takes the contract's existing None return, which
+        # hook.decide already files as an unusable -- and therefore blind --
+        # hot entry. No new policy. A JSON `true` still slips through here,
+        # because Python's bool is an int; that is sighting 15 in
+        # harness/open-questions.md, still open, and deliberately not
+        # resolved in this guard.
         return None
     span = 100 - m0 - m1
     if span <= 0:
@@ -576,22 +625,160 @@ def bucket_pace(bucket, now, m0, m1, band=0):
     pess = pct + 1
     resets = bucket.get("resets_epoch")
     window = bucket.get("window_seconds")
-    if resets is None or window is None:
-        # No reset clause, so f_t is unknown and both lines collapse onto the m0
-        # floor. There is no band to be in: either the grubstake covers you or
-        # you are over, and the latter cannot be solved for a wake time.
+    # `placed` must be decided before ANY arithmetic touches these two -- the
+    # `resets - window` subtraction included, which is why there is a flag
+    # here rather than a bare ternary on None. An earlier version tested only
+    # `window <= 0`, AFTER that subtraction, so a non-numeric value in either
+    # field sailed straight past the guard whose comment claimed to close
+    # this hole: a quoted "18000" raised TypeError at the subtraction itself.
+    placed = (isinstance(resets, (int, float))
+              and isinstance(window, (int, float)) and window > 0)
+    start = resets - window if placed else None
+    if start is None or now < start:
+        # Several ways to have no window position at all, answered by one
+        # return because they deserve one answer. f_t is unknown in each, so
+        # both lines collapse onto the m0 floor. There is no band to be in:
+        # either the grubstake covers you or you are over, and the latter
+        # cannot be solved for a wake time.
+        #
+        # `placed` is a fail-open guard rather than pedantry. Both clause
+        # fields are read back out of state.json unvalidated, and each kind
+        # of garbage found its own way in. A window of 0 divides by zero; a
+        # non-numeric value in either field raises TypeError before it even
+        # gets that far. Both raises land in hook.main's catch-all, which
+        # logs `-- failing open` and turns one corrupt field into a folder
+        # that is silently not paced at all -- the exact outcome bucket_pace's
+        # total return shape exists to prevent. A negative window is worse
+        # than either, because it does not raise: it puts `start` AFTER
+        # `resets`, so the pre-start test below cannot catch it, and -5
+        # measured out at elapsed -9.0 and a brake line of -778%, held `over`
+        # with a wait of zero.
+        #
+        # Why the floor shape and not the void one, for all of that garbage:
+        # garbage in the window POSITION does not make the pct garbage. The
+        # pct is an independent and typically fresh measurement; only the
+        # position is destroyed, and the m0 floor is already this codebase's
+        # answer to "fresh pct, no usable position". It still brakes whenever
+        # `pess > m0`, so nothing is allowed that a missing clause would not
+        # also allow. The void shape would assert a specific falsehood --
+        # that the window has rolled, when its length is unreadable -- and
+        # its `expired: True` forces a refresh in `run` on the first pass of
+        # every invocation, so a daemon bug writing a persistently bad
+        # window_seconds would cost a ~2s subprocess plus a blind hold per
+        # tool call forever, even at 3% usage.
+        #
+        # The two honest cases. No reset clause at all is exactly what a
+        # window that has just rolled looks like, and the state `run`
+        # refreshes INTO when it finds an expired one.
+        #
+        # The other is a clause so far out that the window it implies has not
+        # begun: `now` before `resets - window`. Clock skew does it, and so
+        # does a reparse landing a session reset hours ahead. It used to
+        # fall through to the solve below, where it was wrong twice over.
+        # Measured on a 5h window with the clause 20h out, pct 50: the lines
+        # ran negative -- elapsed -3.0, a brake line of -256%, which nothing
+        # can ever be under -- and, far worse, the solve returned a wake
+        # 18.05h away that `decide` read as REAL. That made the hold
+        # CONFIDENT rather than blind, and blind_delay cannot release a
+        # confident hold while max_delay is off by default, so the only
+        # ceiling left was the 48h hook timeout: a stall measured in days,
+        # against a user rule that says fail free rather than stall forever.
+        # Returning `wake: None` here is what hands it to THE BLIND RULE
+        # instead, which bounds it at blind_delay.
+        #
+        # Clamping the lines alone would NOT have been enough, and would have
+        # been worse than leaving them: the row then reads `over line 5.0%` at
+        # `0.0% elapsed`, indistinguishable from an ordinary start-of-window
+        # brake, where before it read `over line -256.0%` and was obviously
+        # broken. The whole shape has to be the floor shape, not just the two
+        # numbers in it.
         region = "over" if pess > m0 else "free"
         return {"pct": pct, "pess": pess, "allowed": m0, "low": m0,
                 "elapsed": None, "region": region, "over": region == "over",
-                "wait": None, "wake": None}
-    start = resets - window
-    elapsed = (now - start) / window
+                "wait": None, "wake": None, "expired": False}
+    if now > resets + RESET_JITTER:
+        # The window this reading describes has rolled, so the reading is VOID
+        # -- it is not a position. It is not a lower bound on current usage,
+        # because the window was zeroed; and it is not evidence of headroom,
+        # because the window now running has never been observed. Treating it
+        # as a position and extrapolating off the end of its window is what
+        # put the brake line at 853.9% and `elapsed` at 1055.5% on a session
+        # snapshot read 52h late, and what then let that void reading classify
+        # `free`.
+        #
+        # Clamping `elapsed` to 1.0 instead would be a regression, not a
+        # lesser fix: a stale 95% session reading would then sit permanently
+        # in band/over against a 99% line and brake on a window that reset
+        # days ago. The extrapolation is currently the only thing preventing
+        # that, so the reading has to be voided rather than re-anchored.
+        #
+        # Strictly greater, and against the jitter slack rather than `resets`
+        # itself. The slack is not padding: the server rounds the reset times
+        # it prints, so a live window in its final minute reads as already
+        # past its own reset, and without the slack EVERY window end would
+        # spend two minutes voiding readings that are perfectly good.
+        #
+        # What that buys is the `free` and `band` cases, which is where it
+        # pays. An under-the-line reading in those two minutes stays under the
+        # line instead of becoming a blind hard hold, and a banded one keeps
+        # its lower gear. It buys nothing for an over-the-line reading, and
+        # that is worth knowing rather than claiming otherwise: inside the
+        # zone such a reading solves its wake to the reset just behind us, so
+        # hook.decide's `real` guard refuses it and THE BLIND RULE marks the
+        # hold blind -- the same answer expiry would have given.
+        #
+        # The strict `>` decides exactly one instant, `resets + RESET_JITTER`
+        # itself, which stays live. It is NOT what makes plot._unit_pace
+        # immune: that asks about `now == resets` on a one-second window, and
+        # 1.0 is below 1.0 + 120 under either operator. The slack alone
+        # carries that case, as _unit_pace's own docstring says.
+        #
+        # The shape is TOTAL: every key a live shape carries, with numbers
+        # wherever a consumer will format numbers. hook.main catches every
+        # exception and fails open, so a partial shape that crashed some
+        # forgotten consumer would not void one reading -- it would stop
+        # pacing the folder altogether, which is worse than either braking or
+        # running free. It also fails toward HOLDING: region "over" and `over`
+        # True, so a consumer that has never heard of `expired` stops rather
+        # than proceeds, with `wait` and `wake` None because there is no line
+        # left to solve against. `allowed` and `low` sit on the m0 floor
+        # purely so a forgetful formatter cannot raise -- they are a crash
+        # guard, NOT a line that was ever in force, and no consumer may
+        # present them as one.
+        #
+        # In hook.decide this lands as a wake-less hot entry, which THE BLIND
+        # RULE already classifies blind. That is no new policy: "cannot see"
+        # is what this codebase already answers an empty snapshot and a
+        # degraded under-the-line reading with, and a void reading is strictly
+        # less informative than a degraded one.
+        return {"pct": pct, "pess": pess, "allowed": m0, "low": m0,
+                "elapsed": None, "region": "over", "over": True,
+                "wait": None, "wake": None, "expired": True}
+    # Clamped above, never extrapolated: past the printed reset but inside
+    # the slack, "the line is at its final height" is true for that last
+    # minute; "the line is at 103%" never is. With the expiry test above it is
+    # what retires both the 1055.5% elapsed figure `status` printed and the
+    # band -> free slide that let a just-rolled window take a soft hold
+    # against a wake already behind it.
+    #
+    # The clamp is one-sided on purpose. Given the branch above -- which has
+    # returned for every non-positive window and for every `now` below `start`
+    # -- the quotient here is at least 0, so a max(0.0, ...) would be
+    # unreachable. Note that only the LOW side is settled: the quotient does
+    # exceed 1 in the jitter zone (1.006667 at `now == resets + RESET_JITTER`
+    # on a 5h window), which is what the min above is for.
+    #
+    # The max is also left out because writing it back would read as the fix
+    # for the negative case, which it is not: the damage there was the wake
+    # solve returning a far-future instant that `decide` trusted, not the
+    # lines, and clamping the lines alone would have hidden it.
+    elapsed = min(1.0, (now - start) / window)
     allowed = m0 + elapsed * span
     low = max(m0, allowed - band)
     if pess <= low:
         return {"pct": pct, "pess": pess, "allowed": allowed, "low": low,
                 "elapsed": elapsed, "region": "free", "over": False,
-                "wait": None, "wake": None}
+                "wait": None, "wake": None, "expired": False}
     region = "over" if pess > allowed else "band"
     # Solve for the throttle line, not the brake line: `low` is the release
     # target in both braking regions. Not free implies pess > low >= m0, so the
@@ -600,4 +787,4 @@ def bucket_pace(bucket, now, m0, m1, band=0):
     wake = min(start + ((pess + band - m0) / span) * window, resets)
     return {"pct": pct, "pess": pess, "allowed": allowed, "low": low,
             "elapsed": elapsed, "region": region, "over": region == "over",
-            "wait": max(0.0, wake - now), "wake": wake}
+            "wait": max(0.0, wake - now), "wake": wake, "expired": False}

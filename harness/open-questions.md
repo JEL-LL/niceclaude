@@ -506,3 +506,99 @@ stdlib only*). And `harness/README.md`'s "Read these in order" table lists
 every plan but `per-account-state-plan.md`, which decision 19 and the same
 README's *State on disk* section both cite. Neither is wrong about behaviour;
 both send a reader to the wrong place, or to nowhere.
+
+---
+
+## 18. Sighting: `plot.render`'s idle-span shading is zero-width — OPEN
+
+Filed 2026-10-23, seen while routing void readings out of `_pace` in the
+expired-window work. The per-sample loop in `render` means to shade the spans
+where no window was running -- the comment above it says "shading those spans
+says 'nothing to adhere to' rather than leaving a gap that reads as missing
+data" -- but the shading never appears.
+
+`run.append(...)` runs inside `if active:`, before the transition checks below
+it. So at the inactive-to-active edge the guard `prev_active is False and
+active` fires with `run` already non-empty, `xs[0] if not run else x` always
+evaluates to `x`, and the call is `ax.axvspan(x, x, ...)`: zero width. The
+`xs[0]` arm is unreachable, and in any case would only ever shade from the
+segment's first sample rather than from the start of the inactive run. The
+very first sample of a segment is not shaded either, since `prev_active` is
+None there and neither branch fires.
+
+Nothing is wrong with the arithmetic: `idle` is still counted correctly, so
+the "N% of the log had no window running" note and the summary line are
+right. Only the visual cue is missing, which is why it went unnoticed -- a
+reader sees a gap and reads it as missing data, exactly what the shading was
+added to prevent.
+
+Not fixed in the expired-window work, being outside its scope, and it wants a
+change of its own: the fix is to track where the inactive run began rather
+than to patch the span's left edge. Worth doing soon, because that work routes
+MORE samples into the idle path than before -- a sample whose reset clause
+lags its own `ts_epoch` by more than `RESET_JITTER` now returns None from
+`_pace` where it previously drew an extrapolated line.
+
+---
+
+## 19. `plot` does not print the path it wrote — OPEN
+
+Filed 2026-10-23, from the author. `niceclaude plot` writes
+`niceclaude-usage.png` and does not say where. A terminal that linkifies
+paths cannot offer a click, and a reader who ran it from a different
+directory has to go looking.
+
+Print the full absolute path to the written file. The cost is one line and it
+wants no design: the only judgement is to print the resolved absolute path
+rather than the argument as given, since the argument is routinely relative
+and the whole point is that the string be clickable.
+
+---
+
+## 20. A latch earned on the 5h line is discharged against the WEEKLY throttle — OPEN
+
+Filed 2026-10-23, from the author, who describes it as a cycle that yields
+"a single step every day or so and only an expensive one".
+
+`hard` -- the running-down latch -- is one boolean for the whole verdict, not
+one per bucket. `hook.run` latches it, on any hold that is neither soft nor
+blind (`if not soft and not d.get("blind"): hard = True`); `decide` is
+stateless and only ever CONSUMES it. The `banded and supported` branch in
+`decide` then discharges it against `max(h[2] for h in banded)`, which is
+whichever banded bucket wakes LAST. So a latch earned by
+crossing the 5-hour brake line is run down to the WEEKLY throttle line
+whenever the weekly bucket happens to be in its band. Measured, session free
+at 3% and the week merely inside its band at 35%:
+
+```
+hard=False  hold='soft'  wake=0.40d   week:all models 35% in band (line 38.1%, throttle 31.1%)
+hard=True   hold='hard'  wake=0.40d   ... [running down]
+```
+
+Without the latch that is a `soft` hold -- one `band_delay`, three minutes.
+With it, a hard hold aimed days out. `max_delay` is off by default and the
+hold is not blind, so neither of the two escapes applies.
+
+**The cycle.** The 5-hour window starts at first activity, so it does not
+begin until the first step after a sleep. That step is expensive -- the
+prompt cache has gone cold over a multi-day hold -- and a single expensive
+step is enough to push the weekly bucket into its band, which re-latches and
+sleeps for days again. The 5-hour window then expires unused while the hold
+runs. Net effect: roughly one step per cycle, and reliably the most expensive
+kind.
+
+**What the author wants:** the descent to the throttle line should be
+independent per window type. Hitting the top of the 5-hour band should be
+discharged against the 5-hour throttle line, not the weekly one.
+
+Not a bug in the band's own logic -- a descent from over the line IS owed,
+and the comment at the `banded and supported` branch argues correctly for it
+within a single bucket. The defect is that the latch and its release target
+are both global where the lines are per-bucket. A fix likely makes `hard` a
+set of latched bucket keys and solves each descent against its own bucket,
+which also removes the need for `supported` to scan every banded entry.
+
+Adjacent to the expired-window work (`expired-window-plan.md`) but not
+touched by it: that change stops a rolled window from extrapolating, which
+makes the expired 5-hour window in this cycle honest, but does nothing about
+the cross-bucket coupling.

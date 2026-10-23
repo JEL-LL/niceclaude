@@ -65,7 +65,8 @@ from ._shared import (  # noqa: E402
     DEFAULT_BAND, DEFAULT_BAND_DELAY, DEFAULT_CHUNK,
     DEFAULT_FANOUT_RESERVE, DEFAULT_M0, DEFAULT_M1, DEFAULT_MAX_DELAY,
     DEFAULT_POLICY, HOME, HOOK_LOG_PATH, HOOK_TIMEOUT,
-    LOG_PATH, POLICY_PATH, REGISTRY_PATH, ROOT_DIR, SETTINGS_PATH,
+    LOG_PATH, POLICY_PATH, REGISTRY_PATH, RESET_JITTER, ROOT_DIR,
+    SETTINGS_PATH,
     MAX_STALE, STALL_MARKER_PATH, STATE_PATH, WINDOW_SECONDS, account_paths,
     account_slug, blind_delay_of, bucket_pace, model_matches, norm_path,
     normalize_enforce, off_or_num, path_within,
@@ -129,7 +130,6 @@ def classify(line):
         return "info"
     return "suspicious" if any(s in low for s in SUSPICIOUS) else "info"
 
-RESET_JITTER = 120  # the server rounds; 8:09pm and 8:10pm are the same instant
 
 # Reported usage is very nearly monotonic within a window, but not exactly.
 # The renderer floors a float, so a small backend recalculation that crosses
@@ -2314,6 +2314,15 @@ def describe_hold(p, enforced, chunk, band_hold=None, blind=False,
     `now` lets a row whose wake has already passed -- the window reset since
     the reading -- read as unsolvable too, which is how the hook treats it,
     rather than as "HOLDS 0s" for a hold that re-checks on the chunk.
+
+    That guard is kept now that bucket_pace voids an expired reading outright,
+    because it is not redundant: what still reaches it is the jitter zone, a
+    reading within RESET_JITTER of its own printed reset, whose elapsed is
+    clamped to 1.0 and whose wake therefore solves at or before the reset it
+    is clamped to. An expired reading arrives here with `wait` None instead
+    and takes the same unsolvable branch by the first test. It is also the
+    guard that would catch a future regression in that boundary, and it costs
+    one comparison.
     """
     if p["region"] == "band":
         if band_hold is None:
@@ -2467,6 +2476,12 @@ def cmd_status(path):
     # whether an unsolvable row is held blind depends on the whole verdict.
     d = hook.decide(pol, st, key, now, degraded=age > MAX_STALE)
     blind = bool(active and d.get("blind"))
+    # The latest throttle-line crossing among the rows the verdict below was
+    # actually asked about, or None if nothing is in the band. Read only by
+    # that verdict, to tell a crossing it can promise from one it cannot --
+    # see the band branch. Taken from the same bucket_pace dicts the rows are
+    # printed from, never recomputed, so `status` cannot drift from the hook.
+    band_wake = None
     for k, b in st["buckets"].items():
         enforced = active and (
             (k == "session" and "session" in enforce)
@@ -2498,10 +2513,45 @@ def cmd_status(path):
         if p is None:
             print(f"  {k:22} unusable (no percentage)")
             continue
-        if p["elapsed"] is None:
-            # No reset clause yet, so f_t is unknown and bucket_pace judged
-            # against the m0 floor. The line cannot be solved for a wake time.
-            where = f"line {m0:5.1f}% (floor) | window start unknown"
+        if p["expired"]:
+            # The window rolled since this reading was taken, so there is no
+            # position to report at all: the reading is neither a lower bound
+            # on current usage (the window was zeroed) nor evidence of
+            # headroom (the window now running has never been observed). This
+            # is the row that used to read `lines 839.9/853.9% | 1055.5%
+            # elapsed` on a 52h-old session snapshot.
+            #
+            # Branched FIRST, ahead of the floor case below, which it would
+            # otherwise fall into on its None elapsed and be reported as a
+            # merely missing reset clause -- a milder and quite different
+            # thing, and one that says nothing about a rolled window. Neither
+            # `allowed` nor `low` is printed here on purpose: bucket_pace
+            # parks both on the m0 floor as a crash guard, and showing either
+            # would present a line that was never in force.
+            where = (f"window reset {human_delta(now - b['resets_epoch'])} "
+                     f"ago -- reading is void")
+        elif p["elapsed"] is None:
+            # Two different buckets arrive here, both judged against the m0
+            # floor because f_t is unknown and neither can be solved for a
+            # wake time, but they are not the same fact and must not read as
+            # one.
+            #
+            # The first carries no reset clause at all, which is what a
+            # freshly rolled window looks like. The second carries one, but so
+            # far out that the window it implies has not STARTED -- clock
+            # skew, or a reparse landing the reset hours ahead -- and for that
+            # one "window start unknown" would be the single most misleading
+            # thing to print: the clause gives a start, it is simply in the
+            # future. Saying when turns an unreadable row into a diagnosis.
+            begins = None
+            span_s = b.get("window_seconds")
+            if b.get("resets_epoch") is not None and span_s and span_s > 0:
+                begins = b["resets_epoch"] - span_s
+            if begins is not None and begins > now:
+                where = (f"line {m0:5.1f}% (floor) | window starts in "
+                         f"{human_delta(begins - now)}")
+            else:
+                where = f"line {m0:5.1f}% (floor) | window start unknown"
         elif band:
             # Both lines, throttle first. One number cannot say which of three
             # regions a bucket is in, and the throttle line is the one a hold
@@ -2512,6 +2562,10 @@ def cmd_status(path):
         else:
             where = (f"line {p['allowed']:5.1f}% "
                      f"| {p['elapsed'] * 100:5.1f}% elapsed")
+        if (mark == "ENFORCED" and p["region"] == "band"
+                and p["wake"] is not None):
+            band_wake = (p["wake"] if band_wake is None
+                         else max(band_wake, p["wake"]))
         hold = describe_hold(p, enforced, chunk, band_hold, row_blind,
                              blind_hold, now)
         print(f"  {k:22} {p['pct']:>3.0f}% used | {where} | {mark} "
@@ -2560,9 +2614,21 @@ def cmd_status(path):
     if d.get("blind"):
         why = reason[len("BLIND: "):] if reason.startswith("BLIND: ") else reason
         print(f"right now:      BRAKED, blind -- {why}")
-        if age > MAX_STALE:
+        if age > MAX_STALE or d.get("expired"):
             # `status` has not attempted the refresh the hook tries first, so
-            # for a stale snapshot this is a conditional, not a verdict.
+            # wherever the hook would refresh, this is a conditional and not a
+            # verdict.
+            #
+            # Expiry as well as age, because the hook's two refresh triggers
+            # are not the same test. An expired reading forces a refresh on
+            # the first pass WHATEVER the file's age, so a perfectly fresh
+            # snapshot straddling a roll is exactly the case this caveat
+            # exists for -- and the likeliest outcome is that the hook does
+            # not hold at all: the refresh returns the post-roll sample, whose
+            # missing reset clause is judged against the m0 floor, and a few
+            # percent is under it. Without this the report asserted a blind
+            # hold, and a blind_delay to wait out, for a call that sails
+            # straight through.
             print("                The hook refreshes on demand before deciding, so it")
             print("                only actually holds here if that refresh fails.")
         print(f"                No release to solve for; it re-checks every "
@@ -2603,9 +2669,29 @@ def cmd_status(path):
         if cap != band_delay:
             print(f"                (band_delay is "
                   f"{human_delta(band_delay)}; max_delay caps it here.)")
-        print(f"                Full speed resumes in "
-              f"{human_delta(wake_at - now)} ({when} local), when the")
-        print("                throttle line catches up.")
+        if band_wake is not None and band_wake <= now:
+            # The jitter zone. This reading is within RESET_JITTER of its own
+            # printed reset, so it is kept rather than voided, its elapsed is
+            # clamped to 1.0, and its release solves past the window end and
+            # is clipped back to a `resets` already behind us. `decide`
+            # substitutes the next chunk so the hook does not spin at the 1s
+            # nap floor, and that substitute is what `wake_at` holds here --
+            # a re-check time, not a crossing. Printing it as one would
+            # promise full speed at an instant the throttle line can never
+            # reach, which is a worse answer than the bare `0s` this used to
+            # print, because it looks right.
+            print(f"                No crossing to resume at: this window's "
+                  f"printed reset has")
+            print(f"                already passed, so the solve was clipped "
+                  f"to an instant")
+            print(f"                behind us. {human_delta(cap)} per call is "
+                  f"what releases this,")
+            print(f"                and the next look is in "
+                  f"{human_delta(wake_at - now)}.")
+        else:
+            print(f"                Full speed resumes in "
+                  f"{human_delta(wake_at - now)} ({when} local), when the")
+            print("                throttle line catches up.")
     else:
         when = datetime.fromtimestamp(wake_at).strftime("%a %H:%M")
         print(f"right now:      BRAKED -- {reason}")

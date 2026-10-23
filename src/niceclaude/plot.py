@@ -13,7 +13,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from ._shared import DEFAULT_BAND, DEFAULT_M0, DEFAULT_M1, bucket_pace
+from ._shared import (DEFAULT_BAND, DEFAULT_M0, DEFAULT_M1, RESET_JITTER,
+                      bucket_pace)
 
 # From the validated reference palette: the first three categorical slots, a
 # recessive neutral for the threshold, and a status colour for the over-line
@@ -36,8 +37,6 @@ GOOD = "#0ca30c"
 # since all its traces share one pair of axes. The per-bucket panels above it
 # are the facets that carry anything past the third.
 PALETTE = (SERIES_1, SERIES_2, SERIES_3)
-
-RESET_JITTER = 120
 
 
 def _segments(points):
@@ -89,13 +88,35 @@ def _pace(p, m0, m1, band):
     draw a line the hook does not brake on -- and a budget chart that disagrees
     with the controller is worse than no chart.
 
-    elapsed is None exactly when the sample carried no reset clause. bucket_pace
-    collapses both lines onto m0 there, but the panel shades those spans as
-    "nothing to adhere to"; drawing a flat line at the grubstake instead would
-    claim a pace line that was never in force.
+    elapsed is None for three different samples. One carried no reset clause.
+    One carried a clause its own timestamp had already outrun by more than
+    RESET_JITTER -- a lagging clause, the same void reading the hook holds
+    BLIND on (decide's expired arm takes a hard hold bounded by blind_delay);
+    what the hook refuses is to treat it as a position and brake against a
+    line solved from it. And one carried a clause so far AHEAD of its
+    timestamp that the window it implies had not begun. bucket_pace collapses
+    both lines onto m0 in all three, but drawing a flat line at the grubstake
+    would claim a pace line that was never in force, so None here takes the
+    sample out of the drawn run entirely.
+
+    What `render` then does with it is count it: the sample lands in `idle`,
+    which feeds the "N% of the log had no window running" note and the summary
+    line. It is NOT shaded, whatever the comment at the axvspan in `render`
+    says -- that call is zero-width and has never rendered anything (see
+    harness/open-questions.md 18). Worth knowing because this change routes
+    more samples into it than before, from both of the new directions: a
+    lagging clause used to draw an extrapolated line climbing past 100, and a
+    leading one used to draw a negative line. Both now go idle.
+
+    `expired` is tested explicitly even though it always arrives alongside an
+    elapsed of None. The two say different things -- "this sample never
+    carried a reset clause" against "this sample's own timestamp is past the
+    clause it did carry" -- and leaning on the None alone would have this
+    panel start drawing that flat grubstake line the day the expired shape
+    grows an elapsed of its own.
     """
     pace = bucket_pace(p, p["ts_epoch"], m0, m1, band)
-    if pace is None or pace["elapsed"] is None:
+    if pace is None or pace["expired"] or pace["elapsed"] is None:
         return None
     return pace["allowed"], pace["low"]
 
@@ -107,6 +128,15 @@ def _unit_pace(ft, m0, m1, band):
     same two lines with the clock divided out. Putting a synthetic window
     through the same solver stops that panel from parting company with the
     per-bucket ones over an algebraic shortcut.
+
+    _draw_overlay_band samples ft over [0, 1.0] INCLUSIVE, so the right-hand
+    edge asks bucket_pace about `now == resets_epoch == 1.0` exactly. That is
+    not expired: the expiry test is strictly greater and carries RESET_JITTER
+    of slack besides, which swamps a one-second window entirely. The band
+    therefore still draws at its true final height rather than plunging to the
+    m0 floor at its right edge. The slack swamping the synthetic window is
+    harmless -- ft never exceeds 1.0, so the clamp below it is never the thing
+    that answers -- but it is worth knowing before anyone tightens either.
     """
     pace = bucket_pace({"pct": 0, "resets_epoch": 1.0, "window_seconds": 1.0},
                        ft, m0, m1, band)
