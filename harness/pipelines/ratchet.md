@@ -196,6 +196,49 @@ Proceed, and report at the real stop condition.
 
 ---
 
+### 9. Wrong *rationales* outnumber wrong code, and reviews do not catch them
+
+The expensive defect class in a densely commented codebase is not broken code.
+It is prose — comments, docstrings, plan text — asserting behaviour the code
+does not have. Measured on the `expired-window-plan.md` run: of ~47 findings
+across three rounds and a second-model gate, about **7 were wrong code and
+about 16 were wrong rationales**. Five of those were in the plan file itself,
+written confidently and retracted later. One was perfectly inverted — a
+docstring said the hook "refuses to brake on" a void reading when braking on
+void data was the whole doctrine — and three same-model rounds read past it.
+
+They survive review because a reviewer reads a plausible sentence next to the
+code it describes and agrees. Nothing forces the sentence to be executed.
+
+**It is worse in a docs-only phase, not better.** The same change's
+documentation phase — no code, pure prose — drew another 32 findings: a
+review round of 27 and a gate of 5. Six of the 27 were outright false claims
+in freshly written docs, including two numbers asserted rather than computed.
+The gate then found one that no amount of careful reading would catch: the
+changelog described the shipped bug using a property of a **rejected**
+alternative, lifted from the plan section that rejected it. Writing about
+code is not a lower-risk activity than writing code.
+
+**The mitigation that worked: require every comment or doc claim that is
+written or rewritten to be DEMONSTRATED, with the one-line result quoted in
+the agent's report.** Put it in the implementor prompt, not just the reviewer
+prompt. On that run it caught four false claims, three of them written by the
+agent applying the fix, in the same message as the fix. A claim that cannot be
+cheaply demonstrated should be written weaker or omitted.
+
+Two corollaries, both earned the hard way on the same run:
+
+- **Numbers are the worst offenders, because they look checked.** Three
+  separate figures were computed at the *reporting user's* configured margins
+  and then stated as general facts. One propagated out of the plan into a
+  committed code comment and from there into a design-decisions section before
+  anyone recomputed it. Where the number is not the point, write the
+  expression (`100 - m1`) rather than the value.
+- **Re-measure before briefing anyone, including an expert.** A second-model
+  adjudication was once dispatched with "measured on the current tree" figures
+  taken from a tree that had since been edited. The model's first finding was
+  that the brief described a tree that no longer existed.
+
 ## Sub-agent prompt templates
 
 Fill the `<…>` and keep every guardrail line — they are load-bearing.

@@ -708,9 +708,10 @@ def bucket_pace(bucket, now, m0, m1, band=0):
         #
         # Clamping `elapsed` to 1.0 instead would be a regression, not a
         # lesser fix: a stale 95% session reading would then sit permanently
-        # in band/over against a 99% line and brake on a window that reset
-        # days ago. The extrapolation is currently the only thing preventing
-        # that, so the reading has to be voided rather than re-anchored.
+        # over the brake line's final height of 92% (`100 - m1` at the
+        # shipped margins) and brake on a window that reset days ago. The
+        # extrapolation is currently the only thing preventing that, so the
+        # reading has to be voided rather than re-anchored.
         #
         # Strictly greater, and against the jitter slack rather than `resets`
         # itself. The slack is not padding: the server rounds the reset times

@@ -72,6 +72,9 @@ printf '{"cwd":"/tmp/tp","hook_event_name":"PreToolUse"}' | timeout 3 niceclaude
 | 14 | session **50%**, `resets_epoch null`; `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — over the floor with no reset clause is wake-less, so blind |
 | 15 | session **50%**, week 5%; `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **brake** (exit 124) — a real wake makes it a confident brake, which `blind_delay` never touches |
 | 16 | as 13, but `--no-blind-delay` | `/tmp/tp` | **brake** (exit 124) — the old hold-until-seen behaviour |
+| 17 | session **3%**, `resets_epoch` = now minus 52h; `--blind-delay 5`, `NICECLAUDE_BIN=/bin/false`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — the window rolled under the reading, so it is void; `hook.log` reads `session: window reset since this reading` then `release ... (blind-release)` |
+| 18 | session **50%**, `resets_epoch` = now + 20h (a 5h window that has not begun); `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — judged against the `m0` floor with no wake to solve, so blind; `hook.log` reads `session 50% over floor 5%` — a brake reason, where the old code counted down a confident 18h hold |
+| 19 | session **50%**, `"window_seconds": "18000"` (quoted); `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — a non-numeric window length takes the same floor; `hook.log` reads `session 50% over floor 5%` then a `(blind-release)`, and never `ERROR ... -- failing open`, which would mean the hook raised and the folder ran unpaced |
 
 Case 3 guards component-wise prefix matching. Case 10 guards the fail-safe
 exception in `design-decisions.md` §11 — the naive version brakes hardest
@@ -102,7 +105,25 @@ hold left alone, a mixed hot hold that is not blind, the clock across a hold
 that turns un-blind and back, the latch, the tightest cap winning, and the
 `on` and `status` surfaces.
 
-Latency should be **~20ms** for every allow case except 13 and 14.
+Cases 17–19 re-check a reading the hook can no longer place against a running
+window (`design-decisions.md` §23). All three allow at the cap, so read `hook.log`
+rather than the exit code: it is the brake reason that says which hold you
+got. Case 17 needs `NICECLAUDE_BIN` pointed at something that fails, because a
+rolled window forces a refresh however fresh the fixture is — that force is
+the behaviour under test, and the override is only what stops `niceclaude
+refresh` from replacing the fixture with live data. Cases 18–19 need no such
+thing: a fixture written just before the run is inside `NEAR_STALE`, so
+nothing re-reads it. Put the default back afterwards with
+`niceclaude on /tmp/tp --blind-delay 240`. The automated cover is in
+`tests/test_niceclaude.py`: the jitter boundary from both sides, `elapsed`
+never leaving `[0, 1]`, the void shape's key set and its fail-toward-holding
+fields, `decide`'s own reason for it, a live weekly sibling keeping the hold
+confident, a latched descent going blind rather than free, the forced refresh
+and its handoff to the staleness gate, every non-numeric `state.json` field
+returning rather than raising, and the `status` rows for a void window and for
+one that has not begun.
+
+Latency should be **~20ms** for every allow case except 13, 14 and 17–19.
 
 ---
 

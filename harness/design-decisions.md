@@ -376,7 +376,10 @@ declare `detect` and read the model per call from the caller's transcript.
 
 - Unparseable/missing snapshot → **brake** (the tool exists to prevent overspend).
 - Crash inside the hook → **fail open** and log. A bug must never wedge every
-  session; problems should surface via `check` and `hook.log`.
+  session; problems should surface via `check` and `hook.log`. That is a
+  backstop for a bug, not a path any input may reach — `bucket_pace` now
+  returns a shape, or its documented `None`, for any value `state.json` can
+  carry in a bucket's fields (§23).
 - A long hold → **keep holding**, if data justifies it. There is no
   self-imposed ceiling on such a hold. `MAX_BRAKE`
   (6h) used to be one, justified as "by then every window has rolled" — false,
@@ -398,7 +401,14 @@ declare `detect` and read the model per call from the caller's transcript.
   reset clause entirely (`Current session: 0% used`), so `f_t` is unknown. Naive
   fail-safe would brake *hardest at the moment headroom is greatest*. Instead,
   judge against `m0`, which `allowed()` never dips below. See
-  `platform-findings.md` §3.
+  `platform-findings.md` §3. The same floor answers every other bucket with no
+  usable window position: a corrupt `window_seconds`, a non-numeric reset time,
+  and a clause so far ahead that its window has not begun (§23).
+- **A reading whose window has already rolled → brake, but as `blind`.** The
+  other half of the case above: here the snapshot still carries the old
+  window's reset clause, where a freshly rolled one carries none. Extrapolating
+  that reading past its window's end is what §23 retired; the fail-safe is to
+  void it rather than trust it in either direction.
 
 ---
 
@@ -418,12 +428,17 @@ gives an asymmetric rule:
 
 > Stale data can justify **braking**, but never **allowing**.
 
+The bound is on the window the reading was taken in, and nothing else. Usage
+rises monotonically *within* a window; a reset zeroes it. So once that window
+has rolled the reading is not a weak lower bound, it is no bound at all, and
+the asymmetry above has nothing left to stand on (§23).
+
 Concretely:
 
 - Degraded snapshot already over the line → **brake with full confidence.** It
-  can only have got worse since. That holds while its wake is still ahead: a
-  wake at or before now means the window has reset since the reading, which
-  then bounds nothing, and the hold is blind (§22).
+  can only have got worse since — while its own window is still running. Once
+  that window has ended the reading supports no wake at all, so a hold resting
+  on it alone is blind (§22, §23).
 - Degraded snapshot under the line → **brake anyway**, flagged `BLIND`. Being
   under the line according to data known to be out of date is not evidence of
   headroom. Braking is not the same as braking forever, though: a blind hold
@@ -950,3 +965,89 @@ Rejected:
 - *A blind allowance remembered across calls.* It would need state the hook
   does not keep, and the next call's refresh is the better test of whether
   the outage is over.
+
+---
+
+## 23. A reading whose window has rolled is void, not a position
+
+`bucket_pace` computed `elapsed = (now - start) / window` with no upper bound,
+so once `now` passed a bucket's reset the pace lines ran off the end of a
+window that no longer existed: on a snapshot left by a daemon stopped two days
+earlier, a session row priced in the hundreds of percent and marked `clear`
+(README's *A reading whose window has rolled* carries the transcript). The
+verdict that reading produced was right only by accident — `free` plus
+`degraded` falls through to the blind branch, and nothing on that path
+reasoned about the rolled window at all.
+
+Such a reading is now **void**. It is not a lower bound on current usage, since
+the window it measured was zeroed, and not evidence of headroom, since the
+window running now has never been observed. So it lands where this codebase
+already sends "cannot see": a blind hard hold, bounded by `blind_delay` (§22).
+`decide` gives it a reason of its own, `<key>: window reset since this
+reading`, rather than the wake-less arm's false `over floor`, and `status`
+reports how long ago the window reset and calls the reading void instead of
+printing lines for it. The full decision record is `expired-window-plan.md`
+(E1–E14).
+
+Expired is `now > resets + RESET_JITTER` — 120s, moved into `_shared.py` so
+`cli` and `plot` stop keeping their own copies. The slack absorbs the server
+rendering one reset instant a minute either way (`platform-findings.md` §3,
+*Rendering jitter*), which without it would void two minutes of perfectly good
+readings at every window end; inside it the lines clamp to their final height
+rather than extrapolating, so `elapsed` now never exceeds 1.0 anywhere (E1,
+E2).
+
+The void return carries every key a live one carries, and fails toward holding
+(`region: "over"`, no wake), because §11 fails open on a crash: a partial
+shape that broke some forgotten consumer would not degrade one reading, it
+would stop pacing the folder altogether (E3). Its `allowed` and `low` sit on
+the `m0` floor only so a formatter cannot raise: a crash guard, never a line
+that was in force, and no consumer may present them as one. Expiry is per
+bucket, so an expired session beside a week bucket genuinely over its line
+still produces a confident, non-blind hold on the week's own wake (E9). And a
+void reading voids CONTENT without ageing the FILE, which `run`'s freshness
+gate cannot see, so `decide` publishes the state on the verdict and `run`
+forces one refresh on the first pass whatever the file's age (E6).
+
+**The floor, not the void, for a position that is merely unreadable.** Three
+other states reach `bucket_pace` with no usable window position: a
+`window_seconds` of 0 or -5 or a quoted `"18000"`, a non-numeric
+`resets_epoch`, and a reset clause so far ahead that the window it implies has
+not *begun*. All take the `m0` floor shape with no wake, because garbage in the
+window POSITION does not make the pct garbage — the pct is an independent and
+typically fresh measurement, and the floor is already this codebase's answer to
+"fresh pct, no usable position" (§11's freshly-rolled exception). It still
+brakes whenever `pess > m0`, so nothing is allowed that a missing reset clause
+would not also allow. A non-numeric `pct` is the opposite case and takes the
+function's documented `None`, which `decide` files as unusable and THE BLIND
+RULE classifies blind (E13).
+
+Two of those were live defects rather than tidiness. A `window_seconds` of 0,
+or a quoted one, raised out of the arithmetic into §11's fail-open and left the
+folder unpaced on every call; and a not-yet-begun clause solved a wake most of
+a day out that `decide` read as real, which made the hold confident and so
+unreachable by `blind_delay` — the stall §22's rule forbids. Both needed the
+whole floor shape rather than clamped lines, and that is the transferable part:
+it is the missing wake, not the two numbers printed, that decides blind versus
+confident (E12, E13).
+
+Rejected:
+
+- *Clamping `elapsed` to 1.0*, the obvious fix. It makes the display sane and
+  the braking wrong: a stale 95% session reading would then sit permanently
+  over the brake line's final height of 92% (`100 - m1` at the shipped
+  margins) and brake on a window that reset days ago. The runaway
+  extrapolation was the only thing preventing that, so the reading has to be
+  voided rather than re-anchored.
+- *Rolling the window forward* — treating an expired bucket as a new window at
+  `resets` with 0% used. Sound when the snapshot is fresh, unsound when it is
+  stale, so it would need gating on `degraded`: more policy surface for a case
+  already covered. It is also factually wrong, since a session window starts at
+  first activity and does not tile, so after a long idle there is likely no
+  live window to roll into and `resets + k*window` fabricates one.
+- *Validating `state.json` at load time* instead of in `bucket_pace`. That
+  splits one judgement across two places, which is what centralising
+  `bucket_pace` was for.
+- *A void state of its own for a window that has not begun.* It needs no new
+  state: "no usable window position" is precisely what the `m0` floor exists
+  for, and a second one would be surface for no evidence.

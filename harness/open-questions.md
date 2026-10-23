@@ -541,10 +541,11 @@ lags its own `ts_epoch` by more than `RESET_JITTER` now returns None from
 
 ---
 
-## 19. `plot` does not print the path it wrote — OPEN
+## 19. `plot` prints the path it was given, not the resolved absolute path — OPEN
 
-Filed 2026-10-23, from the author. `niceclaude plot` writes
-`niceclaude-usage.png` and does not say where. A terminal that linkifies
+Filed 2026-10-23, from the author. `niceclaude plot` prints `wrote
+<out_path>` with the path exactly as given, and the default is the bare
+relative `niceclaude-usage.png`. A terminal that linkifies
 paths cannot offer a click, and a reader who ran it from a different
 directory has to go looking.
 
@@ -602,3 +603,43 @@ Adjacent to the expired-window work (`expired-window-plan.md`) but not
 touched by it: that change stops a rolled window from extrapolating, which
 makes the expired 5-hour window in this cycle honest, but does nothing about
 the cross-bucket coupling.
+
+---
+
+## 21. Sighting: `status` still raises on a corrupt `window_seconds` — OPEN
+
+Filed 2026-10-23, found while demonstrating the Phase 2 docs for
+`expired-window-plan.md`. E13 closed the fail-open hazard in the HOT PATH:
+`bucket_pace` now type-tests both clause fields before any arithmetic, so a
+quoted `"18000"` in `state.json` takes the m0 floor shape instead of raising
+into `hook.main`'s catch-all. `cmd_status` is the one consumer that still
+raises on exactly that input.
+
+The floor-branch tail that computes when a not-yet-begun window starts reads
+`if b.get("resets_epoch") is not None and span_s and span_s > 0:`, and
+`span_s > 0` is `str > int`. Reproduced end-to-end:
+
+```
+snapshot age:   0s
+--> status RAISES TypeError: '>' not supported between instances of 'str' and 'int'
+```
+
+`niceclaude status` dies mid-table -- after the rule block, before any bucket
+row -- so the one command you would reach for to diagnose a corrupt snapshot
+is the one that cannot survive it.
+
+**Not a regression.** Before the expired-window change `status` raised
+earlier, inside `bucket_pace`'s own `resets - window`. Phase 1 fixed the hot
+path and left this consumer behind, which is the honest way to describe it:
+the hazard moved rather than appeared.
+
+Severity is well below the hook's version of the same bug, and the difference
+is worth stating. The hook failed OPEN and silently: a folder stopped being
+paced and nothing said so. `status` fails LOUD: you get a traceback, on a
+command that changes nothing. Loud and harmless is the right side of that
+trade, which is why this is a sighting rather than a fix folded into the
+expired-window work.
+
+The fix is the same shape as E13's -- test the type before comparing -- and
+wants its own change, with a test, rather than being appended to a docs
+commit.

@@ -34,6 +34,48 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **A corrupt `state.json` no longer silently unpaces the folder.** A
+  `window_seconds` of `0`, or a quoted `"18000"`, or a quoted percentage, made
+  the pace arithmetic raise. Every exception in the hook lands in its
+  catch-all, which logs `ERROR ... -- failing open` and lets the call through,
+  so one bad field in the snapshot stopped the folder being paced at all, on
+  every call, with nothing but a log line to say so. The hook now judges a
+  bucket whose window position is unreadable — a bad `window_seconds` or
+  reset time — against the `m0` grubstake, with no release to solve for:
+  under the floor it runs at full speed, over it holds blind for up to
+  `blind_delay`. An unreadable percentage reads as no reading at all, and
+  holds blind the same bounded way.
+
+- **A reset time further ahead than one whole window no longer holds for
+  days.** Clock skew, or a reparse landing a session reset hours out, used to
+  produce a confident hold counting down to a wake most of a day out — 18
+  hours, in the case measured — with nothing but absurd negative pace lines
+  (`over line -256.0%`) to say anything was wrong. Nothing could cut it
+  short: `blind_delay` releases only
+  a hold that looks blind, and `max_delay` is off by default. Such a reading
+  now takes the same `m0` grubstake as above, the hold it produces is blind
+  and bounded, and the `status` row says when the window begins: `window
+  starts in 15h00m`, in that same case.
+
+- **A reading whose usage window has already rolled is now void, not a
+  position.** The pace line used to be extended past the end of the window the
+  reading was taken in, so a snapshot left behind by a stopped daemon priced a
+  window that had ended two days earlier: pace lines in the hundreds of
+  percent, and the row marked `clear`. (The README section *A reading whose
+  window has rolled* has the transcript.) Such a reading bounds nothing — the
+  window it measured was zeroed, and the one running now has never been seen —
+  so the hook no longer treats it as a position at all. It holds, blind, with
+  `blind_delay`'s 4-minute ceiling on it, logged `session: window reset since
+  this reading`, and the `status` row reads `window reset 2d00h ago -- reading
+  is void` in place of its lines. `plot` drops such a sample from its pace
+  overlay and counts it as idle, rather than drawing a line off the top of the
+  chart — or, for a reset time further ahead than one window, off the bottom.
+
+  A rolled reading also makes the hook refresh immediately, however fresh the
+  snapshot file is, because this kind of reading goes void without the file
+  ageing — so in normal operation the hold ends as soon as that refresh lands
+  rather than at the ceiling.
+
 - **`install` raises Claude Code's subagent stall watchdog. Rerun
   `niceclaude install` in each account after upgrading.** Claude Code kills a
   background subagent after 10 minutes without progress

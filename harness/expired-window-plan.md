@@ -8,34 +8,25 @@ its pace lines off the end of the window.
 
 Symbols are cited by name, not line number.
 
-**Status: Phase 1 (behaviour) implemented -- `_shared.py`, `hook.py`,
+**Status: done. Phase 1 (behaviour) -- `_shared.py`, `hook.py`,
 `cli.py`, `plot.py`, `tests/test_niceclaude.py`, plus a one-line key-set
 update in `tests/test_band.py` (see below) and a new sighting 18 in
 `open-questions.md`. Suite green at 930 passed, 4 skipped (baseline 873).
 Review rounds: 3 under `pipelines/ratchet.md` -- 13, 12 and 17 findings, all
-applied -- then a second-model gate. Phase 2 (docs) not started.**
+applied -- then a second-model gate. Phase 2 (docs) done: `README.md`,
+`CHANGELOG.md`, `design-decisions.md` §11, §12 and the new §23,
+`test-matrix.md` cases 17-19, this file in `harness/README.md`, a new failure
+mode 9 in `pipelines/ratchet.md`, a new sighting 21 (and a corrected heading
+on 19) in `open-questions.md`, and -- committed code edited during the docs
+phase, because section 1.2's figure had propagated into it --
+`src/niceclaude/_shared.py`'s comment in `bucket_pace`. Both ran under
+`pipelines/ratchet.md`.**
 
-**What the rounds actually found, because the ratio is the useful part:** of
-~47 findings, about 7 were wrong CODE. About 16 were wrong RATIONALES --
-comments and plan text asserting behaviour the code did not have -- and five
-of those were in this file, written confidently and retracted later. The rest
-were weak tests, four of which passed with the feature removed entirely. Every
-fix round introduced at least one new defect; round 1's `wake_at` floor and
-round 1's `elapsed` clamp each cost a further round to undo. The mitigation
-that worked was requiring every rewritten comment claim to be DEMONSTRATED,
-with the result quoted; it caught four false claims, three of them written by
-the agent that was applying the fix.
-
-**What the second-model gate was worth.** It ran after three same-model rounds
-had gone over the same tree. It cleared the two things that mattered most by
-execution rather than reading -- no path lets a void reading permit
-proceeding, and no new hold is unbounded -- and then found five things the
-rounds had missed, including one wrong-CODE defect wearing a comment that
-claimed the opposite (E13's guard, above) and one perfectly INVERTED rationale:
-`plot._pace`'s docstring and its test both said the hook "refuses to brake on"
-a void reading, when braking on void data is this change's entire doctrine.
-What it refuses is to treat the reading as a *position*. Someone debugging a
-held agent would have read that and concluded the opposite of their situation.
+This change's review history is not recorded here. Its one durable lesson --
+that wrong RATIONALES outnumbered wrong code roughly two to one, and that the
+mitigation is to demand every written claim be demonstrated -- is a property
+of the pipeline, not of this feature, and lives in
+`pipelines/ratchet.md` failure mode 9.
 
 The rounds changed behaviour in six places beyond the original plan, all
 inside Phase 1's blast radius.
@@ -122,10 +113,19 @@ in `decide`. Nothing in that path reasoned about the expired window at all.
 ### 1.2 Clamping `elapsed` to 1.0 is a regression
 
 The obvious fix makes the display sane and the braking wrong. A stale 95%
-session reading would then sit permanently in `band`/`over` against a 99% line
-and brake on a window that reset days ago -- a reading that bounds nothing. The
-extrapolation is currently the only thing preventing that. Any fix must void
-the reading, not re-anchor it.
+session reading would then sit permanently in `band`/`over` against the brake
+line's final height of 92% (`100 - m1`) and brake on a window that reset days
+ago -- a reading that bounds nothing. The extrapolation is currently the only
+thing preventing that. Any fix must void the reading, not re-anchor it.
+
+(That figure read **99%** until Phase 2's review recomputed it. 99 is the
+final height at the reporting user's margins, m0 20 / m1 1; at the shipped
+defaults it is 92. This is the third figure in this plan computed at those
+margins and presented as general -- see 1.3's pct, corrected the same way --
+and the first to propagate out of this file into a code comment and from
+there into `design-decisions.md` §23. Three review rounds and a gate read
+past it. Write `100 - m1`, not a number, wherever the number is not the
+point.)
 
 ### 1.3 A live defect just past the boundary
 

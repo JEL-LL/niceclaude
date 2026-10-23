@@ -31,6 +31,11 @@ This needs no day-of-week policy. Skip a day and headroom accumulates on its
 own; hammer it in the foreground and background work goes quiet until the line
 catches up.
 
+A reading only prices the window it was taken in: once that window has reset,
+the line is not stretched past its end to meet the reading, and the reading is
+discarded instead — see
+[a reading whose window has rolled](#a-reading-whose-window-has-rolled).
+
 ## Install
 
 Not on PyPI yet — the release pipeline is in place but no version has been cut —
@@ -667,6 +672,43 @@ of the arithmetic, so `status` cannot report `running` while the hook is holding
 the agent. When the snapshot is too stale to trust, it says `BRAKED, blind` and
 prints no release time, because there is none to solve for; it says instead
 when `blind_delay` will let the call through.
+
+### A reading whose window has rolled
+
+The percentage in a snapshot belongs to one particular window. Leave the daemon
+down over a weekend and the 5-hour session window it was measuring ends long
+before you look again, so the reading it left behind describes a window that no
+longer exists. It is not a floor on what you have spent — that window was
+zeroed — and not evidence of headroom either, since whatever is running now has
+never been looked at. It is simply unreadable, and the hook treats it that way
+rather than trusting it.
+
+It used to extend the line past the end of the window instead, which is how a
+52-hour-old snapshot produced this:
+
+```
+  session                  3% used | lines 839.9/853.9% | 1055.5% elapsed | ENFORCED | clear
+```
+
+Those numbers are what the `status` table printed for a window that had ended
+two days earlier, and `clear` is what that row concluded: the line had floated
+so far above any percentage the bucket could report that the reading classified
+as free. Now the row says what it knows instead:
+
+```
+  session                  3% used | window reset 2d00h ago -- reading is void | ENFORCED | HOLDS -- unsolvable, re-checks every 15s, through after 4m00s
+
+right now:      BRAKED, blind -- session: window reset since this reading
+```
+
+That hold is blind, so `blind_delay` bounds it like any other: 4 minutes by
+default, then the call goes through, and `--no-blind-delay` holds until a
+readable snapshot appears. It usually does not come to that: a rolled window
+makes the hook refresh at once, however fresh the file it is holding, because
+this reading went void without the file ageing at all. What the refresh finds
+is typically no session window at all — the server prints no reset time until
+first use starts a new one — which is judged against the `m0` grubstake, and
+at 0% used that runs at full speed.
 
 ## Knowing whether it is worth running
 
