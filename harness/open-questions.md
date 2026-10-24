@@ -652,3 +652,42 @@ expired-window work.
 The fix is the same shape as E13's -- test the type before comparing -- and
 wants its own change, with a test, rather than being appended to a docs
 commit.
+
+---
+
+## 22. `plot` writes its png into the working folder — OPEN
+
+Filed 2026-10-23, from the author. `niceclaude plot` defaults `-o/--out` to
+the bare `niceclaude-usage.png`, so the figure lands in whatever folder the
+command ran in -- which is normally a repository an agent is working in. A
+stray png appearing mid-task is noise the agent then has to reason about, and
+it is not the author's file in any meaningful sense: it is a view of account
+state that happens to have been rendered from there.
+
+**Proposed:** default the output beside `state.json` in the per-account
+`DATA_DIR`, the same place the snapshot and `usage.jsonl` already live, and
+keep a way to ask for the working folder instead -- the author's sketch is
+`--dir .`.
+
+This became viable only with `da760b7`, which made `plot` print the absolute
+path it wrote. A default that writes somewhere other than the current
+directory is a trap if the command does not say where; with the absolute path
+printed, and now clickable, it is just a better default.
+
+Open design questions, none of them hard:
+
+- **Flag shape.** `--dir DIR` beside the existing `-o/--out`, or make `--out`
+  alone mean "exactly this path" while an unqualified run goes to `DATA_DIR`?
+  An explicit `--out` must keep meaning exactly what it says either way, since
+  scripts pass it.
+- **Which account's directory.** `DATA_DIR` is per account (§19), so two
+  accounts would get two pngs under two trees. That is almost certainly right
+  -- the figure is a view of that account's usage -- but it means `plot` run
+  under a different `CLAUDE_CONFIG_DIR` writes somewhere else, and the printed
+  path is what makes that discoverable rather than confusing.
+- **Overwrite.** Today a second run silently replaces the file in whatever
+  folder it was in. Moving to a shared directory makes that more likely to
+  matter, not less.
+
+Small, self-contained, and wants no control-law thought. Worth doing next to
+whichever change touches `plot` or `cli.py`'s parser anyway.
