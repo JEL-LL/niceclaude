@@ -587,7 +587,7 @@ def test_a_wake_already_past_is_not_a_real_one(cwd):
                      "pct": 94, "resets_epoch": HALFWAY - after,
                      "window_seconds": week, "label": None}}}
         d = hook.decide(policy_for(cwd), state, cwd, HALFWAY, degraded=True,
-                        hard=True)
+                        latched={"week:all models"})
         assert d["braked"] is True
         assert d["blind"] is True, after
 
@@ -653,25 +653,46 @@ def over_then_unusable(elapsed):
     return {"session": UNUSABLE, "week:all models": WEEK_IN_BAND}
 
 
-def test_a_running_down_hold_is_not_blinded_by_an_unusable_sibling(held):
-    """The band wake is the release the hard hold is aiming at, and it is
-    real. An unusable session beside it must not turn that into blindness."""
-    with pytest.raises(StillHolding):
-        held(entry={"enforce": ["session", "week"]},
-             buckets=over_then_unusable, clock=Clock(stop_after=1200))
+def test_an_unusable_earner_is_not_carried_by_a_band_sibling(held):
+    """Was test_a_running_down_hold_is_not_blinded_by_an_unusable_sibling,
+    and it is flipped on purpose: it pinned the cross-bucket discharge this
+    change exists to remove (L4).
 
+    The SESSION earned the latch by crossing its own brake line, then went
+    unusable. The week has sat inside its band throughout and crossed
+    nothing. Under THE BLIND RULE's per-bucket form the governing buckets are
+    the hot entries plus the LATCHED banded ones, and nothing qualifies here:
+    the week is banded but unlatched, the session is latched but hot and
+    wake-less. No reading justifies the hold, so it is blind -- where the old
+    rule kept it confident until the week's band wake, a hold of hours on a
+    reading that says nothing whatever about the session's descent.
 
-def test_a_stale_band_still_justifies_a_latched_descent(held):
-    """Stale, the band reading is still a lower bound: a pct above the
-    throttle line proves the true one is above it too. So the descent the
-    hold latched on at 0s is still owed, and the unusable session beside it
-    does not make it blind. (Round 2 had this releasing at 270s, applying
-    the "stale data never proceeds" rule to a hold, which is not proceeding.)
+    Bounded, not freed. blind_delay is this project's answer to a hold that
+    cannot see (design decision 22), under the rule that it is better to fail
+    free than to stall forever. The turn is at 30s and the allowance 240s.
     """
-    with pytest.raises(StillHolding):
-        held(entry={"enforce": ["session", "week"]},
-             buckets=over_then_unusable, stale=True,
-             clock=Clock(stop_after=1200))
+    clk, reason = held(entry={"enforce": ["session", "week"]},
+                       buckets=over_then_unusable)
+    assert reason == "blind-release"
+    assert clk.elapsed == 30 + 240
+
+
+def test_a_stale_band_sibling_does_not_justify_anothers_descent(held):
+    """Was test_a_stale_band_still_justifies_a_latched_descent, flipped for
+    the same reason, and note which half of that name was the wrong half.
+
+    Staleness is not what changed: THE BLIND RULE never consulted it, and a
+    stale reading of the LATCHED bucket itself still supports that bucket's
+    own descent -- see
+    test_a_latched_buckets_own_stale_band_supports_its_descent, which pins
+    it. What is gone is the EXPORT of that support to a bucket that crossed
+    nothing. The week's band reading is not evidence about the session, stale
+    or fresh, so the hold is blind and blind_delay bounds it at 30 + 240s.
+    """
+    clk, reason = held(entry={"enforce": ["session", "week"]},
+                       buckets=over_then_unusable, stale=True)
+    assert reason == "blind-release"
+    assert clk.elapsed == 30 + 240
 
 
 def test_status_reads_a_past_reset_row_as_unsolvable(status, capsys):
@@ -741,7 +762,8 @@ def test_no_blind_delay_help_names_max_delay(capsys):
 #
 # A hard hold is blind iff no bucket governing it has a wake strictly in the
 # future that its reading supports. Governing: the hot entries, plus the band
-# entries once `hard` is latched. Staleness does not enter into it.
+# entries THIS INVOCATION LATCHED -- the ones it saw over their own brake
+# lines (L4). Staleness does not enter into it, and neither does a sibling.
 
 DESCENT_PCT = 47      # pess 48: in the band, throttle line 41.5 at HALFWAY
 
@@ -769,8 +791,14 @@ def test_a_stale_descent_ends_no_earlier_than_its_band_wake(held):
 
 
 def test_a_latched_band_whose_window_has_reset_is_blind(held):
-    """Degraded, hard, band bucket past its reset: its wake is in the past, so
-    it supports nothing. Blind from the turn at 30s; released 240s later."""
+    """Degraded, latched, band bucket past its reset: its wake is in the
+    past, so it supports nothing. Blind from the turn at 30s; released 240s
+    later.
+
+    Over-determined since L4, and worth saying so rather than leaving the
+    docstring to read as the whole account: the week here is also not in
+    `latched` -- the session earned that -- so it is excluded before its wake
+    is ever consulted. Both facts point the same way."""
     past_band = {"pct": 87, "resets_epoch": HALFWAY - 60,
                  "window_seconds": WEEK, "label": None}
 
@@ -798,22 +826,36 @@ BAND_KINDS = {
 }
 
 
+# The third axis (L4). The band bucket is week:all models and the hot one is
+# session, so only the middle entry is a latch the WEEK earned: a latch the
+# session earned is discharged against the session, never against a sibling,
+# and so counts for exactly as much here as no latch at all.
+LATCH_KINDS = {
+    "nothing": (frozenset(), False),
+    "the band bucket": (frozenset({"week:all models"}), True),
+    "the hot bucket": (frozenset({"session"}), False),
+}
+
+
 @pytest.mark.parametrize("degraded", [False, True])
-@pytest.mark.parametrize("hard", [False, True])
+@pytest.mark.parametrize("latch_kind", sorted(LATCH_KINDS))
 @pytest.mark.parametrize("band_kind", sorted(BAND_KINDS))
 @pytest.mark.parametrize("hot_kind", sorted(HOT_KINDS))
-def test_the_blind_rule(cwd, hot_kind, band_kind, hard, degraded):
+def test_the_blind_rule(cwd, hot_kind, band_kind, latch_kind, degraded):
     """The whole matrix, against the rule as stated -- the test that would
-    have caught review rounds 1 to 4, each of which was one cell of it."""
+    have caught review rounds 1 to 4, each of which was one cell of it, now
+    with the per-bucket arm as a third axis rather than one boolean."""
     hot_bucket, hot_supported = HOT_KINDS[hot_kind]
     band_bucket, band_supported = BAND_KINDS[band_kind]
+    latched, band_latched = LATCH_KINDS[latch_kind]
     buckets = {"session": hot_bucket}
     if band_bucket is not None:
         buckets["week:all models"] = band_bucket
     d = hook.decide(policy_for(cwd), state_for(buckets), cwd, HALFWAY,
-                    degraded=degraded, hard=hard)
+                    degraded=degraded, latched=latched)
     assert d["braked"] is True and d["hold"] == "hard"
-    assert d["blind"] is not (hot_supported or (hard and band_supported))
+    assert d["blind"] is not (hot_supported
+                              or (band_latched and band_supported))
 
 
 # --- review round 5 ----------------------------------------------------------
@@ -862,3 +904,184 @@ def test_zero_mid_hold_turn_starts_no_refresh(held):
                        refresh=refresh, clock=clk)
     assert reason == "blind-release"
     assert all(r < 30 for r in refreshes), refreshes
+
+
+# --- per-bucket latch (per-bucket-latch-plan.md, L1-L4) ----------------------
+#
+# Here rather than in test_niceclaude.py because what these pin is the edge
+# between "latched" and "blind": which buckets may arm a descent at all (L2),
+# and which readings still support the one they armed. The control-law half
+# -- that a descent aims at its own bucket's throttle -- is pinned beside the
+# rest of the pace-line tests.
+
+EXPIRED_SESSION = {"pct": 95, "resets_epoch": HALFWAY - 3600,
+                   "window_seconds": SESSION_WINDOW, "label": None}
+
+
+@pytest.mark.parametrize("kind, bucket", [
+    ("unusable", UNUSABLE),
+    ("window rolled", EXPIRED_SESSION),
+    ("over the floor, no clause", floating_bucket(40)),
+    ("jitter zone", past_reset_bucket(95)),
+])
+def test_only_a_bucket_with_a_real_wake_latches(cwd, kind, bucket):
+    """L2. The latch gate is a conjunction -- this entry was judged against
+    its own brake line, AND the wake that sighting solved is still ahead --
+    and each of these is hot yet fails one half of it. The first three never
+    SAW a brake line: the unusable reading carries no percentage, the rolled
+    window's reading bounds nothing in the window now running, and the
+    floor-judged one has no reset clause to solve a line from. A bucket with
+    no line to be over has no descent to owe, so it must not arm one -- the
+    same argument that already keeps a blind hold from latching.
+
+    The jitter-zone reading fails the OTHER half, and is here because
+    nothing else pins that half: it IS over its own brake line, but its
+    elapsed is clamped to 1.0 and its wake solves to the reset just behind
+    `now`, so there is no instant to run down to. A gate that asked only
+    "was it judged over a line?" would latch it; the real wake is what must
+    be demanded.
+
+    The key is the literal bucket key and nothing else (L1): the wake is
+    re-solved from fresh readings every pass, so which bucket crossed is the
+    only durable fact worth carrying.
+    """
+    d = hook.decide(policy_for(cwd), state_for({"session": bucket}), cwd,
+                    HALFWAY)
+    assert d["braked"] is True and d["hold"] == "hard"
+    assert d["blind"] is True, kind
+    assert d["latch"] == [], kind
+    # The contrast that keeps it honest: a bucket genuinely over its own line
+    # does arm one, so this is not a test that nothing ever latches.
+    real = hook.decide(policy_for(cwd),
+                       state_for({"session": session_bucket(HOT_PCT)}), cwd,
+                       HALFWAY)
+    assert real["latch"] == ["session"]
+    assert real["blind"] is False
+    # And beside a hot sibling with a real wake, the latch carries the
+    # sibling's key ALONE: the sibling's crossing arms the sibling's descent
+    # and nobody else's (L1, L2).
+    week_hot = {"pct": 90, "resets_epoch": HALFWAY + WEEK // 2,
+                "window_seconds": WEEK, "label": None}
+    pair = hook.decide(policy_for(cwd),
+                       state_for({"session": bucket,
+                                  "week:all models": week_hot}), cwd, HALFWAY)
+    assert pair["latch"] == ["week:all models"], kind
+    assert pair["blind"] is False, kind
+
+
+def test_every_paced_verdict_carries_a_latch_list(cwd):
+    """The totality `expired` already has, for the same reason (E3). `run`
+    reads d['latch'] on every pass, and hook.main catches every exception and
+    fails open -- so a branch that omitted the key would not misreport one
+    verdict, it would stop pacing the folder.
+
+    Only the hot branch may report a non-empty one (L2); every other paced
+    branch reports []. The unpaced early-out is deliberately not in the set,
+    as it carries no region, chunk or blind_delay either.
+    """
+    free = state_for({"session": session_bucket(FREE_PCT)})
+    band = state_for({"session": session_bucket(BAND_PCT)})
+    hot = state_for({"session": session_bucket(HOT_PCT)})
+    verdicts = {
+        "free": hook.decide(policy_for(cwd), free, cwd, HALFWAY),
+        "hot": hook.decide(policy_for(cwd), hot, cwd, HALFWAY),
+        "soft": hook.decide(policy_for(cwd), band, cwd, HALFWAY),
+        "running down": hook.decide(policy_for(cwd), band, cwd, HALFWAY,
+                                    latched={"session"}),
+        "degraded": hook.decide(policy_for(cwd), free, cwd, HALFWAY,
+                                degraded=True),
+        "no usable buckets": hook.decide(policy_for(cwd), state_for({}), cwd,
+                                         HALFWAY),
+        "no per-model row": hook.decide(
+            policy_for(cwd, {"enforce": ["model"]}), hot, cwd, HALFWAY),
+    }
+    for name, d in verdicts.items():
+        assert "latch" in d, f"{name} verdict omits it"
+        assert d["latch"] == ([] if name != "hot" else ["session"]), name
+    # Guard the guard: these really are the branches claimed.
+    assert verdicts["soft"]["hold"] == "soft"
+    assert "[running down]" in verdicts["running down"]["reason"]
+    assert verdicts["degraded"]["reason"].startswith("BLIND:")
+    assert verdicts["no per-model row"]["braked"] is False
+    assert hook.decide(policy_for(cwd, {"paced": False}), free, cwd,
+                       HALFWAY) == {"paced": False}
+
+
+def test_a_latched_buckets_own_stale_band_supports_its_descent(cwd):
+    """The doctrine case that MUST survive the two flips above (L4, L6).
+
+    A stale pct is a lower bound -- usage only rises within a window -- so a
+    stale reading of the LATCHED bucket still above its own throttle line
+    proves the true one is too, and the wake that reading solves is finite.
+    "Stale data may justify braking" is intact wherever it is honest; what
+    the flips removed is only its export to a bucket that crossed nothing.
+
+    The contrast is the same reading with nothing latched, which is no
+    descent at all: degraded, the soft branch refuses it (proceeding is the
+    one thing stale data can never justify) and it falls through to the
+    degraded blind hold.
+    """
+    reading = session_bucket(DESCENT_PCT)
+    state = state_for({"session": reading}, age=9999)
+    d = hook.decide(policy_for(cwd), state, cwd, HALFWAY, degraded=True,
+                    latched={"session"})
+    assert d["hold"] == "hard"
+    assert d["blind"] is False
+    assert "[running down]" in d["reason"]
+    assert d["wake_at"] == bucket_pace(reading, HALFWAY, 5, 8, 7)["wake"]
+
+    plain = hook.decide(policy_for(cwd), state, cwd, HALFWAY, degraded=True)
+    assert plain["blind"] is True
+    assert "[running down]" not in plain["reason"]
+
+
+def test_a_descent_that_ends_on_the_soft_cap_says_so(held):
+    """Per bucket this is how most descents end (L4): the descent clears at
+    the bucket that earned it, an unlatched sibling is left in its band, the
+    verdict downgrades hard -> soft, and the soft cap -- brake_start plus
+    band_delay, counted from the start of the WHOLE hold -- is already
+    spent, so the release is immediate. hook.log then shows one `brake` line
+    whose elapsed can dwarf the band_delay knob, so the release says
+    `band-release-after-descent` rather than naming a cap its own duration
+    contradicts.
+
+    The contrast that keeps the label honest is a hold that opened hard with
+    NO descent armed -- blind, say -- and became an ordinary throttle, which
+    keeps the plain `band-release`
+    (test_a_blind_hold_that_sees_the_band_becomes_a_throttle above): the
+    gate is the latch set, not "did this hold open under the brake verb".
+    """
+    def at(elapsed):
+        if elapsed < 600:
+            return {"session": session_bucket(HOT_PCT),
+                    "week:all models": WEEK_IN_BAND}
+        return {"session": session_bucket(FREE_PCT),
+                "week:all models": WEEK_IN_BAND}
+
+    clk, reason = held(buckets=at)
+    assert reason == "band-release-after-descent"
+    assert clk.elapsed == 600          # band_delay is 180: already spent
+    opens = [m for m in held.logs if m.startswith(("brake", "throttle"))]
+    assert len(opens) == 1 and opens[0].startswith("brake  ")
+
+
+def test_an_unusable_sibling_does_not_blind_a_bucket_in_its_own_band(cwd):
+    """The mirror of the two flips above, and why they narrow the rule
+    rather than retreat from it (L4).
+
+    Swap the roles. The SESSION crossed its own brake line and is descending
+    through its own band; the WEEK is unusable beside it. The latched
+    bucket's own band wake is real, so a supported wake exists and the hold
+    stays confident: an unusable sibling does not blind a descent that is
+    genuinely owed. The hot branch is what returns, because an unusable
+    reading is filed hot, and `supported` is the term that un-blinds it.
+    """
+    state = state_for({"session": session_bucket(DESCENT_PCT),
+                       "week:all models": UNUSABLE})
+    d = hook.decide(policy_for(cwd), state, cwd, HALFWAY, latched={"session"})
+    assert d["braked"] is True and d["hold"] == "hard"
+    assert d["blind"] is False
+    assert "week:all models: unusable" in d["reason"]
+    # Unlatched, the same pair is blind: nothing here has crossed anything,
+    # so there is no descent for the session's band wake to support.
+    assert hook.decide(policy_for(cwd), state, cwd, HALFWAY)["blind"] is True

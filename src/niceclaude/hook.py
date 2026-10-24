@@ -344,11 +344,11 @@ def model_tag(policy, entry, caller_model):
     return f"model={model}(declared)" if model else "model=none"
 
 
-def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
-           caller_model=None):
+def decide(policy, state, cwd, now, degraded=False, event=None,
+           latched=frozenset(), caller_model=None):
     """Return {'paced':..,'braked':..,'wake_at':..,'reason':..,'blind':..,
     'chunk':..,'max_delay':..,'band_delay':..,'blind_delay':..,'region':..,
-    'hold':..,'expired':..}.
+    'hold':..,'expired':..,'latch':..}.
 
     'expired' says at least one ENFORCED bucket's window has rolled since the
     snapshot was taken, so its reading is void. `run` reads it to force one
@@ -379,19 +379,46 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
 
     'blind' marks a hard hold that THE BLIND RULE (in the body, above the
     `if hot:` branch) finds unjustified: no governing bucket -- the hot
-    entries, plus the banded ones when `hard` is latched -- has a wake
+    entries, plus the banded ones whose own key is in `latched` -- has a wake
     strictly after `now`. It is what `run` lets blind_delay release.
 
-    `hard` is the CALLER'S MEMORY, and it is what makes the band hysteresis
-    real. This function is stateless: it reclassifies from scratch every pass,
-    so a bucket held above the brake line stops being 'over' the instant the
-    line rises past `pess` -- which is the old release point, the one with no
-    headroom behind it. Left to itself it would then release, and the whole
-    band would be decoration. Passing `hard=True` says "this hold began above
-    the brake line", and a hold that began there runs all the way down to the
-    throttle line rather than stopping at the brake line on the way past.
-    `run` latches it only on a hard hold that is not blind: a blind hold has
-    seen no line to begin above.
+    'latch' is the list of bucket KEYS this verdict saw over their own brake
+    line with the wake that sighting solved still ahead, for `run` to
+    remember (L1, L2). A key is the literal string in state['buckets'] --
+    'session', 'week:all models' -- and nothing else is carried, because the
+    wake is re-solved from fresh readings every pass and never committed to
+    (design-decisions section 6), so WHICH bucket crossed is the only durable
+    fact worth remembering. Only the hot branch can report a non-empty one;
+    every other paced branch reports [], for the same totality reason
+    'expired' is on every verdict.
+
+    `latched` is the CALLER'S MEMORY, and it is what makes the band
+    hysteresis real. This function is stateless: it reclassifies from scratch
+    every pass, so a bucket held above the brake line stops being 'over' the
+    instant the line rises past `pess` -- which is the old release point, the
+    one with no headroom behind it. Left to itself it would then release, and
+    the whole band would be decoration. A key in `latched` says "THIS bucket
+    was seen over its OWN brake line during this invocation", and such a
+    bucket runs all the way down to its own throttle line rather than
+    stopping at its brake line on the way past (L6).
+
+    Per bucket, and that is the whole point of the argument: a descent is
+    owed to the bucket that earned it. As one boolean for the entire verdict
+    it was discharged against the LAST-waking banded bucket whatever had
+    earned it, so a session brake solved to under an hour became a hold on
+    the weekly band's throttle crossing -- and that line rises
+    `(100 - m0 - m1) / (7 * 86400)` percent per second, so a single point of
+    band costs it the best part of two hours. A sibling's band reading says
+    nothing about the earner's descent, so it no longer lengthens one; a hold
+    that no reading justifies is by definition blind, and blind_delay is the
+    bound this project already ships for that (design decision 22).
+
+    `run` latches only the keys the hot branch publishes, and that gate is a
+    conjunction: over its own brake line, AND the wake that sighting solved
+    still ahead. An unusable, expired or floor-judged entry never saw a line
+    to begin above, so it has no descent to owe; a reading in the jitter zone
+    saw one but solved its wake to a reset already behind us, so it has no
+    instant to run down to (L2).
 
     `degraded` means the snapshot is older than MAX_STALE and could not be
     refreshed -- we are flying blind. Stale data is not useless, though: usage
@@ -503,14 +530,18 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
                 "blind_delay": blind_delay,
-                "region": "free", "blind": False, "expired": False}
+                "region": "free", "blind": False, "expired": False,
+                "latch": []}
     if not enforced:
+        # Latches nothing, and that is L2 at its starkest: there is no bucket
+        # here to key a latch by, let alone one seen over a line.
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": now + chunk,
                 "reason": "no usable buckets in snapshot", "chunk": chunk,
                 "max_delay": max_delay, "band_delay": band_delay,
                 "blind_delay": blind_delay,
-                "region": "over", "blind": True, "expired": False}
+                "region": "over", "blind": True, "expired": False,
+                "latch": []}
 
     # Kept apart, because the two demand different things. An `over` bucket
     # demands a hold until ITS throttle line catches up, which can be hours. A
@@ -606,9 +637,13 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     #   A hard hold is blind if and only if no bucket that governs it has a
     #   wake strictly in the future that its reading supports.
     #
-    # The governing buckets are the hot entries, plus the banded entries once
-    # `hard` is latched (a descent from over the line is still owed). A
-    # wake-less entry supports nothing, and there are now three kinds:
+    # The governing buckets are the hot entries, plus the banded entries
+    # THIS INVOCATION LATCHED -- the ones it saw over their own brake lines,
+    # which are the only ones still owed a descent (L4). A banded bucket
+    # nobody latched is one we wandered into the band of from below; it is a
+    # soft hold's business and governs no hard one, so it neither keeps a
+    # hard hold confident nor lengthens it. A wake-less entry supports
+    # nothing, and there are now three kinds:
     # unusable, over the m0 floor with no reset clause, and EXPIRED -- the
     # window rolled under the reading, so it bounds nothing in the window now
     # running. The expired arm above files that one.
@@ -629,7 +664,13 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
     # true one is above it too, and any wake it gives is finite. That is
     # reason enough to HOLD. It is never reason to PROCEED, which is why the
     # soft-band branch, and only it, refuses stale data.
-    supported = any(h[2] > now for h in banded) if hard else False
+    # Per bucket (L1, L4): a banded entry governs this hold only if its OWN
+    # key is latched. `due` is kept beside `banded` rather than replacing it
+    # because the reason string still names every bucket in play -- hook.log
+    # is read by eye, and a bucket that stopped lengthening the hold is not a
+    # bucket that stopped being worth printing.
+    due = [h for h in banded if h[0] in latched]
+    supported = any(h[2] > now for h in due)
 
     if hot:
         # Confident even when degraded: consumption only rises, so a stale
@@ -638,44 +679,100 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
         # reason so the log tells the whole story, but does not lengthen this.
         #
         # Blindness by THE BLIND RULE above: a hot entry's fourth field says
-        # whether its own wake is supported, and a latched descent's band
-        # wakes count as well -- so an unusable sibling appearing mid-descent
-        # does not turn a justified hold into a blind one. One supported wake
-        # anywhere and it is not blind, however wake-less the rest.
+        # whether its own wake is supported, and a LATCHED bucket's own band
+        # wake counts as well -- so an unusable sibling appearing beside a
+        # bucket that is itself running down does not turn a justified hold
+        # into a blind one. One supported wake anywhere and it is not blind,
+        # however wake-less the rest. The converse is the defect this change
+        # removes: an unlatched sibling merely sitting in its band is not
+        # support for anything, and a hold left with nothing else is blind.
         seen = any(h[3] for h in hot) or supported
+        # The only branch that can publish a key (L2). `h[3]` is the same
+        # fourth field `seen` reads, and it is a CONJUNCTION: this entry was
+        # judged against its own brake line AND the wake that sighting solved
+        # is still ahead. Each half excludes something.
+        #
+        # An unusable, expired or floor-judged entry fails the first: it saw
+        # no line, so it has no descent to owe and must not arm one.
+        #
+        # A reading in the JITTER ZONE fails the second, and that case is
+        # worth naming because it is not "saw no line" -- it IS over its own
+        # brake line (pess > allowed), but its elapsed is clamped to 1.0 and
+        # its wake solves to the reset just behind us, so there is no instant
+        # to run down to. That is a real narrowing against the old boolean
+        # latch -- not because this verdict armed it (alone it is blind, and
+        # the old `not soft and not blind` guard never armed on a blind one),
+        # but because, once armed by anything else (an earlier over-line
+        # pass, or a hot sibling with a real wake making this verdict
+        # non-blind), the one boolean covered such a bucket too; the bucket
+        # now gets band_delay rather than a descent when it drops into its
+        # band. It is bounded by RESET_JITTER, past which the reading expires
+        # and fails the first half anyway.
         return {"paced": True, "braked": True, "hold": "hard",
                 "wake_at": max(h[2] for h in hot),
                 "reason": "; ".join(h[1] for h in hot + banded),
                 "chunk": chunk, "max_delay": max_delay,
                 "band_delay": band_delay, "blind_delay": blind_delay,
-                "region": region, "blind": not seen, "expired": expired}
+                "region": region, "blind": not seen, "expired": expired,
+                "latch": [h[0] for h in hot if h[3]]}
 
-    # A hold that began above the brake line does not end at it.
+    # A bucket that began above its OWN brake line does not end at it.
     #
     # This is the branch the band exists for, and it is easy to lose: by the
     # time the brake line has risen past `pess` the bucket classifies as
     # `banded`, and every other rule here would let it go -- at exactly the
-    # zero-headroom release point the band was added to avoid. `hard` is the
-    # only thing that distinguishes "we are passing through the band on our way
-    # down from a real brake" from "we wandered into the band from below", and
-    # those two deserve opposite answers.
+    # zero-headroom release point the band was added to avoid. `latched` is
+    # the only thing that distinguishes "THIS BUCKET is passing through its
+    # band on its way down from a real brake" from "we wandered into THIS
+    # bucket's band from below", and those two deserve opposite answers.
+    #
+    # Asked per bucket, because the answer is per bucket. `due` is the latched
+    # ones, and the wake is the latest of THEIR wakes -- each already solved
+    # against its own throttle line by bucket_pace, so nothing needs inventing
+    # here. An unlatched banded bucket stays in `reason` and is dropped from
+    # the arithmetic: it earned no descent, and lending it one was how a
+    # session brake came to be discharged against the weekly line's throttle
+    # crossing hours later.
     #
     # Note the cap: this is a `hard` hold, so band_delay has no say in it. The
     # agent is coming down from over the line and the only knob that may cut
     # that short is max_delay, exactly as before the band existed.
     #
-    # Taken whenever THE BLIND RULE above finds a supported band wake, stale
-    # or not: a stale reading still above the throttle line proves the true
-    # one is too, so the descent is still owed and is not blind. A latched
-    # hold whose band wakes have all passed (the window reset under a stale
-    # reading) supports nothing, and falls through to the branches below.
-    if banded and supported:
+    # Taken whenever THE BLIND RULE above finds a supported wake among the
+    # DUE entries, stale or not: a stale reading of the latched bucket itself
+    # still above its throttle line proves the true one is too, so that
+    # bucket's descent is still owed and is not blind. What no longer counts
+    # is a sibling's band reading, which says nothing about the earner. A
+    # descent whose own wakes have all passed (the window reset under a stale
+    # reading) supports nothing, and falls through to the branches below --
+    # as does a band with nothing latched in it at all, which reaches the
+    # soft branch.
+    #
+    # What that soft verdict costs is NOT one band_delay, and the difference
+    # is worth stating because per bucket this is how most descents now end.
+    # `run` caps a soft hold at `brake_start + band_delay`, and brake_start is
+    # the start of the WHOLE hold rather than of the soft phase -- so a band
+    # inherited at the end of a hard descent is charged
+    # `max(0, band_delay - (now - brake_start))`, which is zero for any
+    # descent that already ran longer than band_delay, and the release is
+    # immediate -- logged `band-release-after-descent`, so the brake line it
+    # terminates is not left citing a knob its duration contradicts.
+    # The lower gear re-engages on the next PreToolUse, which gets
+    # a fresh brake_start. That is the right answer -- re-charging a delay
+    # after an hour of holding would be perverse -- but "it costs one
+    # band_delay" is true only of a hold that was soft from the start.
+    #
+    # Publishes no latch: the keys in `due` are already in the caller's set,
+    # which is how they got here, and a bucket in its band is below its brake
+    # line and so is earning nothing new.
+    if due and supported:
         return {"paced": True, "braked": True, "hold": "hard",
-                "wake_at": max(h[2] for h in banded),
+                "wake_at": max(h[2] for h in due),
                 "reason": "; ".join(h[1] for h in banded) + " [running down]",
                 "chunk": chunk, "max_delay": max_delay,
                 "band_delay": band_delay, "blind_delay": blind_delay,
-                "region": region, "blind": False, "expired": expired}
+                "region": region, "blind": False, "expired": expired,
+                "latch": []}
 
     # Two ways a band stops being a reason to hold.
     #
@@ -733,7 +830,8 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
                 "reason": "; ".join(h[1] for h in banded),
                 "chunk": chunk, "max_delay": max_delay,
                 "band_delay": band_delay, "blind_delay": blind_delay,
-                "region": region, "blind": False, "expired": expired}
+                "region": region, "blind": False, "expired": expired,
+                "latch": []}
 
     if degraded:
         # Under the line according to data we know to be out of date. That is
@@ -751,12 +849,13 @@ def decide(policy, state, cwd, now, degraded=False, event=None, hard=False,
                 "reason": f"BLIND: snapshot {age}s old and refresh failing",
                 "chunk": chunk, "max_delay": max_delay,
                 "band_delay": band_delay, "blind_delay": blind_delay,
-                "region": "over", "blind": True, "expired": expired}
+                "region": "over", "blind": True, "expired": expired,
+                "latch": []}
 
     return {"paced": True, "braked": False, "hold": None, "chunk": chunk,
             "max_delay": max_delay, "band_delay": band_delay,
             "blind_delay": blind_delay, "region": region, "blind": False,
-            "expired": expired}
+            "expired": expired, "latch": []}
 
 
 # Backoff for refresh attempts. If /usage is unreachable -- network down, auth
@@ -803,10 +902,17 @@ def run(cwd, event=None, payload=None):
     next_try = 0.0       # earliest time we may attempt another refresh
     was_blind = False
     first = True         # only the first pass demands a near-line-fresh read
-    hard = False         # this hold began above the brake line, so it runs all
-                         # the way down to the throttle line rather than
-                         # stopping at the brake line on its way past. `decide`
-                         # is stateless, so this latch is the hysteresis.
+    latched = set()      # the KEYS of the buckets this invocation has seen
+                         # over their OWN brake lines. Each one runs all the
+                         # way down to its own throttle line rather than
+                         # stopping at its brake line on the way past;
+                         # `decide` is stateless, so this set is the
+                         # hysteresis. Per bucket (L1) because a descent is
+                         # owed to the bucket that earned it -- as one
+                         # boolean it was discharged against whichever banded
+                         # bucket woke last, which on the weekly line is a
+                         # different order of magnitude from the hold that
+                         # earned it.
     was_soft = False
     told_foreign = False  # `foreign snapshot` is logged once per invocation,
                           # not once per chunk of a hold that cannot refresh
@@ -847,7 +953,7 @@ def run(cwd, event=None, payload=None):
         age = snapshot_age(state, now)
         degraded = age is None or age > MAX_STALE
         d = decide(policy, state, cwd, now, degraded=degraded, event=event,
-                   hard=hard, caller_model=caller)
+                   latched=latched, caller_model=caller)
         # Whether this pass was blind BEFORE any refresh. A hold that turns
         # blind mid-way turns at this decide, not the one after the refresh,
         # so the refresh below is blind time and must be on the blind clock.
@@ -920,8 +1026,8 @@ def run(cwd, event=None, payload=None):
             state = load()
             age = snapshot_age(state, now)
             degraded = age is None or age > MAX_STALE
-            d = decide(policy, state, cwd, now, degraded=degraded, event=event,
-                       hard=hard, caller_model=caller)
+            d = decide(policy, state, cwd, now, degraded=degraded,
+                       event=event, latched=latched, caller_model=caller)
         first = False
 
         if not d.get("paced"):
@@ -930,20 +1036,31 @@ def run(cwd, event=None, payload=None):
         if not d.get("braked"):
             return brake_start, "line-caught-up"
 
-        # Latch. Once a hold is hard it stays hard for the rest of this
-        # invocation, which is what carries it down through the band.
+        # Latch, by bucket key. Once a bucket is latched it stays latched for
+        # the rest of this invocation, which is what carries it down through
+        # its own band. Accumulated rather than assigned: a second bucket can
+        # cross its line part way through a hold, and it earns its own descent
+        # without disturbing the first one's.
         #
-        # Only a hold that data justifies sets it -- one `decide` does not mark
-        # blind, under THE BLIND RULE stated there. A blind hold is hard too,
-        # but it never saw the brake line, so it has nothing to run down
-        # from: latched, the next pass would let any band bucket with a
-        # future wake "justify" it as a descent, un-blind it, reset the blind
-        # clock, and hold until that band wake -- hours, on the weekly line.
-        # A hold that DID begin over the line keeps its latch through a later
-        # blind spell, which is intended: the descent is still owed.
+        # No guard on the verdict, and the two that used to be here are gone
+        # (L3). They tested `not soft and not blind`, and both are now
+        # provably redundant: a soft verdict comes only from the soft branch
+        # and a blind one only from a branch with no supported hot wake, and
+        # `decide` publishes a key only from its hot branch and only for an
+        # entry whose own wake is real -- so each of those verdicts carries
+        # the empty list and latches nothing of its own accord.
+        #
+        # The trap those guards were written for is gone with them: a blind
+        # hold latching, after which any band bucket with a future wake
+        # "justified" it as a descent it never earned, un-blinded it and
+        # reset the blind clock. That cannot be built out of a per-bucket
+        # latch, because a latch is now discharged only against its OWN
+        # bucket and a bucket that never crossed its line is never in here.
+        #
+        # A bucket that DID cross keeps its latch through a later blind
+        # spell, which is intended and unchanged: the descent is still owed.
         soft = d.get("hold") == "soft"
-        if not soft and not d.get("blind"):
-            hard = True
+        latched |= set(d.get("latch") or ())
 
         # The blind clock, which runs while `decide` says blind (THE BLIND
         # RULE, stated there). What it bounds is continuous blindness within
@@ -988,6 +1105,27 @@ def run(cwd, event=None, payload=None):
             # logged under the brake verb -- the reader is told to treat an
             # unmatched `throttle` as noise, so without this the one hold that
             # can silently end in a kill is the one that looks least important.
+            #
+            # There is deliberately NO extra line going down, and per bucket
+            # that direction is now the common one: a descent that clears and
+            # leaves an unlatched sibling in its band downgrades hard -> soft,
+            # and the soft cap -- counted from brake_start, the start of the
+            # WHOLE hold -- is then usually already spent, so the release is
+            # immediate. The dangerous direction must not hide under a verb
+            # the reader is told to ignore, which is why this arm logs a
+            # line of its own; the safe direction instead re-labels the line
+            # it already owns. The release check below returns
+            # `band-release-after-descent` for exactly this ending, so the
+            # `brake` line's matching release explains itself rather than
+            # naming a band_delay knob its printed duration contradicts --
+            # and since it is a re-labeling, not a new line, the volume
+            # rationing the opening arm above does is no argument against it.
+            #
+            # Note what `was_soft` therefore means: "this hold OPENED as a
+            # throttle and has not yet been re-logged as a brake". It is not a
+            # running copy of `soft` and must not become one -- a hold that
+            # opened as a brake, downgraded, and escalated again needs no
+            # second brake line, because its first one is already right.
             was_soft = False
             was_blind = d.get("blind", False)
             log(f"brake  cwd={cwd} [escalated from throttle] "
@@ -1055,7 +1193,19 @@ def run(cwd, event=None, payload=None):
             return brake_start, "blind-release"
         if deadline is not None and now >= deadline:
             if soft:
-                return brake_start, "band-release"
+                # The downgrade direction's label (the escalation arm above
+                # explains the pairing). A hold that armed a descent and is
+                # ending on the soft cap has a deadline of `brake_start +
+                # band_delay` with brake_start the start of the WHOLE hold,
+                # so its logged duration can dwarf the band_delay knob a bare
+                # `band-release` would name; the distinct reason is what
+                # reconciles the line with itself. Gated on `latched` rather
+                # than on `not was_soft`, because a hold can open hard with
+                # no descent at all -- blind, say -- and then turn into an
+                # ordinary throttle; nothing ran down there, and the plain
+                # label is the true one.
+                return brake_start, ("band-release-after-descent" if latched
+                                     else "band-release")
             return brake_start, ("max_delay-release-WHILE-BLIND"
                                  if d.get("blind") else "max_delay-release")
 

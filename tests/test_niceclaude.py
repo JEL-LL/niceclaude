@@ -14,8 +14,8 @@ import pytest
 from niceclaude import cli
 from niceclaude import hook
 from niceclaude import plot
-from niceclaude._shared import (NEAR_STALE, RESET_JITTER, bucket_pace,
-                                model_matches, norm_path)
+from niceclaude._shared import (DEFAULT_BAND, NEAR_STALE, RESET_JITTER,
+                                bucket_pace, model_matches, norm_path)
 
 # A fixed instant, so reset-clause parsing (which has to infer the year) is
 # deterministic. Chosen a few hours before the sample reset times below.
@@ -950,7 +950,7 @@ def test_every_paced_verdict_carries_the_expired_key(cwd):
         "free": hook.decide(policy_for(cwd), free, cwd, HALFWAY),
         "soft": hook.decide(policy_for(cwd), band, cwd, HALFWAY),
         "running down": hook.decide(policy_for(cwd), band, cwd, HALFWAY,
-                                    hard=True),
+                                    latched={"session"}),
         "degraded": hook.decide(policy_for(cwd), free, cwd, HALFWAY,
                                 degraded=True),
         "no usable buckets": hook.decide(policy_for(cwd), state_for({}), cwd,
@@ -975,52 +975,267 @@ def test_every_paced_verdict_carries_the_expired_key(cwd):
                        HALFWAY) == {"paced": False}
 
 
-# --- E10: the `hard` latch needs no change -----------------------------------
+# --- E10: an expired descent is blind, latched or not ------------------------
 
 def test_a_latched_descent_whose_window_expires_goes_blind_not_free(cwd):
     """E10, pinned rather than merely reasoned about.
 
-    `hard` is the caller's memory that this hold began above the brake line,
-    and it is what carries a hold down through the band instead of releasing
-    at the brake line on the way past. If the window rolls mid-descent the
-    reading backing it is void, so the descent is no longer owed by anything:
-    the bucket goes expired -> hot -> blind. It must not go free, and it must
-    not stay confident. `supported` counts only BANDED wakes, which an
-    expired bucket no longer produces, so the latch cannot manufacture one.
+    `latched` is the caller's memory of which buckets it saw over their own
+    brake lines, and it is what carries each of them down through its band
+    instead of releasing at the brake line on the way past. If the window
+    rolls mid-descent the reading backing it is void, so the descent is no
+    longer owed by anything: the bucket goes expired -> hot -> blind. It must
+    not go free, and it must not stay confident. `due` is drawn from the
+    BANDED entries, which an expired bucket no longer produces, so the latch
+    cannot manufacture one.
     """
     state = state_for({"session": session_bucket(95)}, now=EXPIRED_NOW)
-    latched = hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW, hard=True)
+    latched = hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW,
+                          latched={"session"})
     assert latched["braked"] is True
     assert latched["hold"] == "hard"
     assert latched["blind"] is True
-    # ...and identically to the unlatched verdict: `hard` changes nothing
+    # ...and identically to the unlatched verdict: the latch changes nothing
     # here, which is the claim E10 makes.
     assert latched == hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW)
+    assert latched["latch"] == []       # nor does it arm a new one (L2)
 
 
-def test_a_latched_descent_is_not_unlatched_by_a_live_band_sibling(cwd):
-    """The latch's own guarantee survives one bucket going void: a week
-    bucket still in the band supports the descent, so the hold stays
-    confident, while the expired session still refuses to supply a wake."""
+def test_a_live_band_sibling_does_not_rescue_a_latched_descent(cwd):
+    """Was test_a_latched_descent_is_not_unlatched_by_a_live_band_sibling,
+    and it is flipped on purpose (L4). It pinned the cross-bucket discharge
+    this change removes: the SESSION earned the latch and then went void,
+    while the week merely sat in a band it had wandered into, and the week's
+    wake kept the hold confident for hours.
+
+    Under THE BLIND RULE's per-bucket form the governing buckets are the hot
+    entries plus the banded ones whose own key is latched. The week is banded
+    and unlatched, so it governs nothing; the session is latched but hot and
+    wake-less. Nothing supports the hold, so it is blind -- and blind_delay
+    bounds it, which is better than failing free and far better than holding
+    for hours on a reading that says nothing about the session.
+    """
     week_resets = EXPIRED_NOW + 6 * 86400   # f_t ~ 1/7, line ~17.4%
     state = state_for({"session": session_bucket(95),
                        "week:all models": week_bucket(15, week_resets)},
                       now=EXPIRED_NOW)
-    d = hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW, hard=True)
+    d = hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW,
+                    latched={"session"})
     assert d["braked"] is True
     assert d["hold"] == "hard"
-    assert d["blind"] is False          # the band sibling's wake is supported
-    # The three above are all true of the pre-change tree too, which judged
-    # the void session against an extrapolated line and reached the same
-    # verdict by the wrong route. These are what say WHICH branch ran: the
-    # session is hot (so the region is over, not band), it is named as
-    # rolled rather than as over a line, the hot branch is what returned --
-    # not the running-down one -- and the wake is the chunk, because the one
-    # hot entry has no wake of its own.
+    assert d["blind"] is True           # the band sibling supports nothing
+    # Which branch ran: the session is hot (so the region is over, not band),
+    # it is named as rolled rather than as over a line, the hot branch is
+    # what returned -- not the running-down one -- and the wake is the chunk,
+    # because the one hot entry has no wake of its own.
     assert d["region"] == "over"
     assert "session: window reset since this reading" in d["reason"]
     assert "[running down]" not in d["reason"]
     assert d["wake_at"] == EXPIRED_NOW + 15
+    # Bounded, not merely unconfident. Section 4 item 7 asks each flip for
+    # the release it ends at, and the docstring above claims blind_delay
+    # supplies it -- which with the knob written null it would not.
+    assert d["blind_delay"] is not None
+    # The strongest statement of the per-bucket rule: an unlatched week makes
+    # no difference to this verdict at all, so there is no path by which a
+    # sibling's band could have mattered.
+    assert d == hook.decide(policy_for(cwd), state, cwd, EXPIRED_NOW)
+
+
+# --- per-bucket latch: a descent is owed to the bucket that earned it -------
+#
+# per-bucket-latch-plan.md, decisions L1-L7. The latch was one boolean for
+# the whole verdict while the pace lines are per bucket, so the running-down
+# branch discharged it against `max(h[2] for h in banded)` -- whichever
+# banded bucket woke LAST, however little it had to do with the crossing
+# that earned the hold.
+
+# policy_for supplies m0 5 and m1 8 and declares no band, so these run on the
+# shipped DEFAULT_BAND. Handed to bucket_pace so every expected wake below is
+# solved by the same arithmetic decide brakes on rather than a second copy.
+PACE = (5, 8, DEFAULT_BAND)
+
+# The repro geometry, as window fractions. allowed(f) = m0 + (100-m0-m1)*f,
+# so f=0.2 puts the session brake line under a 30% session, and f=0.553 puts
+# the weekly throttle line a few points under a 50% week -- several points
+# the weekly line has to climb, which on a seven-day window is hours.
+SESSION_OVER_FT = 0.2
+WEEK_IN_BAND_FT = 0.553
+
+
+def _session_at(pct, f_t, now):
+    """A session reading of a window `f_t` of the way through at `now`, and
+    FROZEN: the dict does not change as `now` advances, which is what a hold
+    with no successful refresh is looking at."""
+    return session_bucket(pct, resets=now + SESSION_WINDOW * (1 - f_t))
+
+
+def _week_at(pct, f_t, now):
+    return week_bucket(pct, now + WEEK_WINDOW * (1 - f_t))
+
+
+def test_a_session_brake_does_not_jump_to_the_weekly_band(cwd):
+    """Plan section 1, the repro. The session is over its own brake line; the
+    week is merely inside a band it wandered into and has crossed nothing.
+
+    The hold is the session's own crossing, solved against the session's own
+    throttle line, and it must not become the week's the moment the rising
+    line drops the session into its band (L4). That instant is where the
+    defect fired: `banded and supported` aimed at the last-waking banded
+    bucket, so an under-an-hour session brake turned into a hold on the
+    weekly throttle crossing.
+    """
+    t0 = HALFWAY
+    session = _session_at(30, SESSION_OVER_FT, t0)
+    week = _week_at(50, WEEK_IN_BAND_FT, t0)
+    state = state_for({"session": session, "week:all models": week}, now=t0)
+    s_wake = bucket_pace(session, t0, *PACE)["wake"]
+    w_wake = bucket_pace(week, t0, *PACE)["wake"]
+    assert w_wake > s_wake              # the trap is a real one in this shape
+
+    first = hook.decide(policy_for(cwd), state, cwd, t0)
+    assert first["latch"] == ["session"]        # the key, and only it (L1/L2)
+    assert first["wake_at"] == s_wake
+    assert bucket_pace(week, t0, *PACE)["region"] == "band"
+
+    # Half an hour on, the line has risen past the session's pess and the
+    # session classifies `band`. The descent is the session's, and the week's
+    # wake no longer lengthens it.
+    later = t0 + 1800
+    d = hook.decide(policy_for(cwd), state, cwd, later, latched={"session"})
+    assert bucket_pace(session, later, *PACE)["region"] == "band"
+    assert "[running down]" in d["reason"]
+    assert d["wake_at"] == s_wake < w_wake
+    # The week is still named, because hook.log is read by eye and should say
+    # what was in play; it simply no longer lengthens anything.
+    assert "week:all models 50% in band" in d["reason"]
+
+
+def test_a_fresh_session_window_at_the_floor_is_bounded_by_its_own_window(cwd):
+    """Plan section 1.1, which is why the defect was user-visible at all.
+
+    `hard` lived in `run` and died with each tool call, so one defect-run
+    inflated ONE call. What made it a cycle is that it RE-ARMS: a long hold
+    lets the 5-hour session window expire unused, the next step is cache-cold
+    and therefore big, and it lands in a fresh window whose brake line has
+    only just left `m0` -- which it is instantly over. That earned a latch,
+    and the latch was discharged against the week again. One expensive step
+    per hold.
+
+    Bounded by the session's own window now: bucket_pace clamps every wake to
+    its own reset, and the week's wake is past that reset here, so the two
+    answers are distinguishable rather than merely different numbers.
+    """
+    t0 = HALFWAY
+    session = _session_at(8, 9 * 60 / SESSION_WINDOW, t0)   # 9 minutes old
+    week = _week_at(52, WEEK_IN_BAND_FT, t0)
+    state = state_for({"session": session, "week:all models": week}, now=t0)
+    s_wake = bucket_pace(session, t0, *PACE)["wake"]
+    w_wake = bucket_pace(week, t0, *PACE)["wake"]
+    assert w_wake > session["resets_epoch"] > s_wake
+
+    first = hook.decide(policy_for(cwd), state, cwd, t0)
+    assert "session 8% over line" in first["reason"]
+    assert first["latch"] == ["session"]
+    assert first["wake_at"] == s_wake
+
+    later = hook.decide(policy_for(cwd), state, cwd, t0 + 1200,
+                        latched={"session"})
+    assert "[running down]" in later["reason"]
+    assert later["wake_at"] == s_wake
+
+
+def test_a_crossed_bucket_runs_down_to_its_own_throttle(cwd):
+    """L6, per bucket. The hysteresis guarantee is not weakened, only stopped
+    from being exported: the bucket that crossed its own brake line still
+    runs all the way to its OWN throttle line and is handed back with the
+    full band of headroom behind it, rather than at the zero-headroom release
+    point the band exists to avoid.
+
+    The load-bearing assertion is `held_on["wake_at"] == wake`, taken on the
+    one verdict that reaches `if due and supported:`. Without it this test
+    survives the sneaky mutation -- keep the per-bucket `due` gate, revert
+    only `wake_at` to `max(h[2] for h in banded)` -- which is exactly the
+    "reintroduce the defect behind the new plumbing" failure the plan's
+    section 3 warns about. The comparison at t0 cannot see it: the session is
+    hot there, and the hot branch never had the defect (L5).
+
+    The unlatched week sits in its band throughout, so this also says a
+    sibling neither shortens nor lengthens the descent.
+    """
+    t0 = HALFWAY
+    session = _session_at(30, SESSION_OVER_FT, t0)
+    week = _week_at(50, WEEK_IN_BAND_FT, t0)
+    wake = bucket_pace(session, t0, *PACE)["wake"]
+
+    alone = hook.decide(policy_for(cwd),
+                        state_for({"session": session}, now=t0), cwd, t0)
+    both = state_for({"session": session, "week:all models": week}, now=t0)
+    with_week = hook.decide(policy_for(cwd), both, cwd, t0)
+    assert alone["wake_at"] == with_week["wake_at"] == wake
+
+    # Still held a second before the throttle line meets it, and -- the
+    # assertion this test exists for -- still aiming at the SESSION's own
+    # wake, not at the week's. This is the running-down branch's arithmetic,
+    # the only place the defect lived.
+    held_on = hook.decide(policy_for(cwd), both, cwd, wake - 1,
+                          latched={"session"})
+    assert held_on["hold"] == "hard"
+    assert "[running down]" in held_on["reason"]
+    assert held_on["wake_at"] == wake
+
+
+def test_two_buckets_over_their_own_lines_wait_for_the_later(cwd):
+    """L5. The hot branch does not change, and `max(h[2] for h in hot)` is
+    not the defect. Two buckets each over their OWN brake line must BOTH be
+    satisfied, each wake already solves against its own throttle line, and
+    the max of them is that conjunction -- the lines doing their job. Both
+    keys latch, because both crossed.
+    """
+    t0 = HALFWAY
+    session = _session_at(30, SESSION_OVER_FT, t0)
+    week = _week_at(60, 0.4, t0)         # brake line 39.8%: a 60% week is over
+    state = state_for({"session": session, "week:all models": week}, now=t0)
+    s_wake = bucket_pace(session, t0, *PACE)["wake"]
+    w_wake = bucket_pace(week, t0, *PACE)["wake"]
+    assert bucket_pace(week, t0, *PACE)["region"] == "over"
+    assert w_wake > s_wake
+
+    d = hook.decide(policy_for(cwd), state, cwd, t0)
+    assert d["wake_at"] == max(s_wake, w_wake) == w_wake
+    assert sorted(d["latch"]) == ["session", "week:all models"]
+    assert d["blind"] is False
+
+
+def test_the_wake_target_never_changes_bucket_across_the_crossing(cwd):
+    """Plan test 6, and the reason it is a walk rather than an instant.
+
+    A single-instant test is blind to this whole class: the old code aimed at
+    the session while the session was hot and at the week from the first pass
+    it was not, and either instant alone looks defensible. Walking the
+    over-to-band transition minute by minute is what shows the target holding
+    still. Every step is the session's own wake, before and after the
+    crossing, and the walk is asserted to really contain both regions.
+    """
+    t0 = HALFWAY
+    session = _session_at(30, SESSION_OVER_FT, t0)
+    week = _week_at(50, WEEK_IN_BAND_FT, t0)
+    state = state_for({"session": session, "week:all models": week}, now=t0)
+    s_wake = bucket_pace(session, t0, *PACE)["wake"]
+
+    latched = set()
+    regions = set()
+    t = t0
+    while t < s_wake:
+        d = hook.decide(policy_for(cwd), state, cwd, t, latched=latched)
+        assert d["braked"] is True and d["hold"] == "hard", t - t0
+        assert d["blind"] is False, t - t0
+        assert d["wake_at"] == s_wake, t - t0
+        latched |= set(d["latch"])
+        regions.add(bucket_pace(session, t, *PACE)["region"])
+        t += 60
+    assert regions == {"over", "band"}   # the walk really did cross
+    assert latched == {"session"}        # and the week never armed anything
 
 
 # --- E5: the plot module, and the synthetic one-second window ----------------

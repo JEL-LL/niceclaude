@@ -355,11 +355,18 @@ else here: see E3.
   `seen = any(h[3] for h in hot) or supported` is satisfied by the week
   entry's real wake. The expired sibling must not drag it blind.
 
-- **E10. The `hard` latch needs no change.** A latched descent whose window
-  resets goes expired -> `hot` -> blind. Blind never unlatches (`hard` is only
-  ever set, never cleared, on a non-blind hard hold), and `supported` counts
-  only `banded` wakes, which an expired bucket no longer produces. Verified by
-  reading, pinned by a test.
+- **E10. The latch does not rescue an expired descent.** A latched descent
+  whose window resets goes expired -> `hot` -> blind. Blind never unlatches
+  (a key is only ever added to the latch, never removed, and only by the hot
+  branch), and `due` counts only `banded` wakes, which an expired bucket no
+  longer produces. Verified by reading, pinned by a test.
+
+  (Written when the latch was a single boolean `hard` and the scan was
+  `supported` over every banded entry. `per-bucket-latch-plan.md` made it a
+  set of bucket keys and narrowed the scan to `due`, the latched subset. The
+  decision survived that change untouched -- which is the point of recording
+  it -- but the symbols it named did not, and a citation that does not
+  resolve is the defect class this plan spent four rounds on.)
 
 Added during review. These four were settled by a second model (Fable) after
 the orchestrator twice introduced defects by improvising this class of
