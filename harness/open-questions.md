@@ -565,7 +565,20 @@ and the whole point is that the string be clickable.
 
 ---
 
-## 20. A latch earned on the 5h line is discharged against the WEEKLY throttle — OPEN
+## 20. ~~A latch earned on the 5h line is discharged against the WEEKLY throttle~~ — FIXED
+
+**Fixed 2026-10-26 in `f93bdcd`**, documented in `2c23889`. `hard` became
+`latched`, a set of bucket keys, so a descent is discharged against the bucket
+that earned it: `due` is the latched subset of `banded`, and the running-down
+branch aims at `max(h[2] for h in due)`. The measured case goes from a 0.9h
+brake becoming ~9h to staying 0.9h. Decisions and the re-arming cycle are in
+`per-bucket-latch-plan.md`; `design-decisions.md` §24 is the record.
+
+**Still open, as parts B and C of that plan:** publishing the latch so
+`status` can show which windows are descending, and a CLI verb to clear one
+(the author's case: dropping a day-long weekly descent to band-delay pacing
+while they are at the machine and want to talk to the model before leaving).
+The original entry follows.
 
 Filed 2026-10-23, from the author, who describes it as a cycle that yields
 "a single step every day or so and only an expensive one".
