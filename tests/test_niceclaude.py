@@ -1320,6 +1320,34 @@ def status_folder(tmp_path, monkeypatch):
     return setup
 
 
+@pytest.mark.parametrize("bad", [
+    {"window_seconds": "18000"},          # a quoted length
+    {"resets_epoch": "1789000000"},       # a quoted reset time
+])
+def test_status_survives_a_corrupt_clause_field(status_folder, capsys, bad):
+    """The one command you would run to diagnose a corrupt snapshot has to be
+    the one that survives it.
+
+    `bucket_pace` gained a type test for exactly this input (E13), and the
+    floor branch's tail in `cmd_status` was the last consumer still comparing
+    the raw field: a quoted "18000" made `span_s > 0` a str-vs-int compare
+    that threw TypeError out of the middle of the table, after the rule block
+    and before any bucket row. open-questions 21.
+    """
+    bucket = {"pct": 50, "resets_epoch": RESETS, "window_seconds": 18000,
+              "label": None}
+    bucket.update(bad)
+    folder = status_folder(HALFWAY, {"session": bucket})
+    assert cli.cmd_status(folder) == 0
+    out = capsys.readouterr().out
+    # The BUCKET ROW, not the word "session" -- which also appears in the rule
+    # block above, printed before the point where the old code raised, so a
+    # bare `"session" in out` would have held on output that never got here.
+    assert "session" in out and "50% used" in out
+    # And it says the one true thing about a window it cannot place.
+    assert "window start unknown" in out
+
+
 def test_status_reports_a_rolled_window_as_void(status_folder, capsys):
     """E3. The row that produced this plan read
 

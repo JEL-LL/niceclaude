@@ -628,7 +628,16 @@ the cross-bucket coupling.
 
 ---
 
-## 21. Sighting: `status` still raises on a corrupt `window_seconds` — OPEN
+## 21. ~~Sighting: `status` still raises on a corrupt `window_seconds`~~ — FIXED
+
+**Fixed 2026-10-26.** `cmd_status`'s floor-branch tail now type-tests both
+clause fields before comparing, the same guard `bucket_pace` uses (E13), so
+`status` survives the snapshot it exists to diagnose. Pinned by
+`test_status_survives_a_corrupt_clause_field`, parametrized over a quoted
+`window_seconds` AND a quoted `resets_epoch` -- the first version tested only
+the first field, and mutating the other half of the guard away left the whole
+suite passing. The original entry follows.
+
 
 Filed 2026-10-23, found while demonstrating the Phase 2 docs for
 `expired-window-plan.md`. E13 closed the fail-open hazard in the HOT PATH:
@@ -668,7 +677,32 @@ commit.
 
 ---
 
-## 22. `plot` writes its png into the working folder — OPEN
+## 22. ~~`plot` writes its png into the working folder~~ — FIXED
+
+**Fixed 2026-10-26.** The figure defaults to this account's `DATA_DIR`,
+beside `state.json`. `--dir .` asks for the working folder, `--dir DIR` for
+any other, `--out FILE` names an exact path and wins over both. `render`
+guards the write and returns 1 with the absolute path rather than raising --
+the default moved into a directory whose *writability* had never been
+required, and a mistyped `--dir` used to traceback after the whole figure had
+been drawn.
+
+Two residuals, recorded rather than fixed:
+
+- **Under a shared `NICECLAUDE_DIR`, accounts share one file.** The design
+  question below assumed two accounts get two pngs under two trees. That is
+  true of the default layout and false when `NICECLAUDE_DIR` is set, where
+  every account resolves to the same `data_dir` -- verified: an account key of
+  `''` and one of `work-abc` both give `/tmp/shared`. README documents that
+  configuration as supported, so two accounts plotting there overwrite each
+  other silently.
+- **Overwrite is unchanged.** A second run still replaces the file without
+  asking, which matters slightly more now that the destination is shared
+  between runs from different folders rather than scoped to the one you were
+  standing in.
+
+The original entry follows.
+
 
 Filed 2026-10-23, from the author. `niceclaude plot` defaults `-o/--out` to
 the bare `niceclaude-usage.png`, so the figure lands in whatever folder the

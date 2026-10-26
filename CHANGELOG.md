@@ -34,6 +34,22 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **`plot` writes its figure beside this account's state by default**, instead
+  of into the folder the command ran in. That folder is normally a repository
+  someone is working in, and a `niceclaude-usage.png` appearing there mid-task
+  is noise; the figure is a view of account state, so it goes where that state
+  already lives. `--dir .` asks for the old behaviour, `--dir DIR` for any
+  other folder, and `--out FILE` still names an exact path and wins over both.
+  Safe to change only because `plot` prints the absolute path it wrote.
+
+- **`status` no longer dies on a corrupt `window_seconds`.** A non-numeric
+  window length in `state.json` -- a quoted `"18000"`, say -- made the
+  floor-branch tail compare a string against a number, and `niceclaude status`
+  raised `TypeError` out of the middle of its table: after the rule block,
+  before any bucket row. The one command you would run to diagnose a corrupt
+  snapshot was the one that could not survive it. The hook was already safe
+  here; this was the last consumer reading the field raw.
+
 - **Holds are materially shorter: a brake earned by one window is no longer run
   down to another window's throttle line.** The memory that carries a hold down
   through the band used to be one flag for the whole verdict, discharged
@@ -71,7 +87,7 @@ signs of a daemon that was missed.
   case, and `hook.log` is the record of what the hook actually did.
 
 - **`plot` prints the absolute path it wrote**, rather than the argument it
-  was given -- which defaults to the bare `niceclaude-usage.png` and so named
+  was given -- which was then the bare `niceclaude-usage.png` and so named
   nothing usable from anywhere but the directory the command ran in. The line
   can now be pasted into a browser or clicked in a terminal that linkifies
   paths.

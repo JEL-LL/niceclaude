@@ -426,12 +426,27 @@ def render(series, out_path, m0=DEFAULT_M0, m1=DEFAULT_M1, band=DEFAULT_BAND):
         f"({geometry};  {span_h:.0f}h)",
         color=INK, fontsize=14, fontweight="bold", x=0.012, ha="left", y=0.995)
     fig.subplots_adjust(left=0.075, right=0.985, top=0.935, bottom=0.075)
-    fig.savefig(out_path, dpi=150, facecolor=SURFACE)
+    # Guarded, because the default output moved. `plot` used to write only
+    # into the folder the caller was standing in -- somewhere they had just
+    # chosen, and could be assumed to own -- and only ever READ the data
+    # directory. The default now writes there, so a read-only data directory,
+    # or a mistyped `--dir`, turned the last step of a successful render into
+    # a traceback. Same shape as the two failures above: say what could not be
+    # done, and return 1.
+    try:
+        fig.savefig(out_path, dpi=150, facecolor=SURFACE)
+    except OSError as exc:
+        print(f"error: cannot write {os.path.abspath(out_path)}: {exc}",
+              file=sys.stderr)
+        return 1
     # Absolute, because the point of printing it is that it can be used: pasted
     # into a browser, or clicked in a terminal that linkifies paths. `--out`
-    # defaults to a bare filename and is usually given relative, so what was
-    # printed before was `niceclaude-usage.png` -- true, and useless to anyone
-    # not standing in the directory the command happened to run from.
+    # is usually given relative when it is given at all, so what was printed
+    # before was `niceclaude-usage.png` -- true, and useless to anyone not
+    # standing in the directory the command happened to run from. It no longer
+    # carries that bare filename as its default: an unqualified run now
+    # resolves to the data directory, which makes printing the absolute path
+    # load-bearing rather than merely helpful.
     #
     # abspath rather than realpath: this is the path the user asked for, made
     # usable. realpath would resolve symlinks along the way and hand back

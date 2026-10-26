@@ -472,6 +472,74 @@ def test_the_geometry_flags_default_to_unset():
     assert (a.m0, a.m1, a.band) == (12.0, None, 4.0)
 
 
+# --- where the figure lands (open-questions 22) -------------------------------
+
+@pytest.fixture
+def written(monkeypatch, tmp_path):
+    """cmd_plot against a stubbed renderer, reporting the PATH it resolved.
+
+    The log is stubbed empty and the renderer never runs, because what is
+    under test is the resolution -- `--out` over `--dir` over the account's
+    data directory -- and not the drawing. DATA_DIR is redirected so the
+    default cannot depend on where the suite happens to run.
+    """
+    from niceclaude import plot as plotmod
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(cli, "DATA_DIR", str(data))
+    monkeypatch.setattr(cli, "load_log", lambda: [])
+    seen = []
+    monkeypatch.setattr(plotmod, "render",
+                        lambda series, out, m0, m1, band:
+                        seen.append(out) or 0)
+
+    def run(out=None, outdir=None):
+        assert cli.cmd_plot(out, outdir, None, None, None, None) == 0
+        return seen[-1]
+
+    run.data = str(data)
+    return run
+
+
+def test_an_unwritable_destination_is_reported_not_raised(tmp_path, capsys):
+    """`plot` used to write only where the caller was standing -- somewhere
+    they had just chosen. Defaulting into the data directory, and adding
+    `--dir`, made two new ways for the write to fail after the whole figure
+    had been drawn: a read-only data directory, and a mistyped `--dir`. Both
+    were tracebacks; both are now the same shape as the no-matplotlib and
+    no-panels failures above them (open-questions 22).
+    """
+    pytest.importorskip("matplotlib")
+    records = [record(RAW, ts_epoch=1789000000 + i * 3600) for i in range(6)]
+    series = collect(records, cli.parse_usage)
+    missing = tmp_path / "nope" / "usage.png"
+    assert render(series, str(missing), 5, 8, 3) == 1
+    err = capsys.readouterr().err
+    assert "cannot write" in err
+    # Named absolutely, because a relative path in an error about where a file
+    # could not go is the same uselessness the absolute print fixed.
+    assert str(missing) in err
+
+
+def test_the_figure_defaults_beside_the_state_it_draws(written):
+    """Not into the folder the command ran in, which is normally a repository
+    someone is working in -- a png appearing there mid-task is noise, and the
+    figure is a view of account state rather than the author's file."""
+    assert written() == os.path.join(written.data, "niceclaude-usage.png")
+
+
+def test_dir_dot_asks_for_the_working_folder(written):
+    """The documented way back to the old behaviour."""
+    assert written(outdir=".") == os.path.join(".", "niceclaude-usage.png")
+
+
+def test_out_names_an_exact_path_and_beats_dir(written):
+    """`--out` has to keep meaning exactly what it says, because scripts pass
+    it; a resolution that quietly relocated it would break them silently."""
+    assert written(out="/tmp/exact.png") == "/tmp/exact.png"
+    assert written(out="/tmp/exact.png", outdir=".") == "/tmp/exact.png"
+
+
 @pytest.fixture
 def drawn(monkeypatch):
     """Run cmd_plot against a stubbed renderer and report the line it asked
@@ -485,7 +553,8 @@ def drawn(monkeypatch):
                         calls.append((m0, m1, band)) or 0)
 
     def run(**kw):
-        args = dict(out="x.png", days=None, m0=None, m1=None, band=None)
+        args = dict(out="x.png", outdir=None, days=None, m0=None, m1=None,
+                    band=None)
         args.update(kw)
         assert cli.cmd_plot(**args) == 0
         return calls[-1]

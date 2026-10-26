@@ -602,6 +602,12 @@ To size one against a run you already have rather than by arithmetic:
 niceclaude plot --days 7 --band 2
 ```
 
+The figure lands beside this account's state rather than in the folder you ran
+from — that folder is usually a repository you are working in, and the chart
+is a view of account state rather than a file of yours. `plot` prints the
+absolute path it wrote, so you can click or paste it; `--dir .` puts it in the
+current folder instead, and `--out FILE` names an exact path.
+
 With no geometry flags at all, `plot` draws the line the **current folder is
 actually paced against**: the `m0`, `m1` and `band` of the rule covering it,
 falling back to `defaults` for anything that rule does not set, resolved

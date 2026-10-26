@@ -2545,8 +2545,17 @@ def cmd_status(path):
             # future. Saying when turns an unreadable row into a diagnosis.
             begins = None
             span_s = b.get("window_seconds")
-            if b.get("resets_epoch") is not None and span_s and span_s > 0:
-                begins = b["resets_epoch"] - span_s
+            resets = b.get("resets_epoch")
+            # Type-tested before the comparison, not merely checked against
+            # None. Both fields come back out of state.json unvalidated, and a
+            # quoted "18000" made `span_s > 0` a str-vs-int compare that threw
+            # TypeError out of the middle of the table -- so the one command
+            # you would run to diagnose a corrupt snapshot was the one that
+            # could not survive it. `bucket_pace` guards its own arithmetic
+            # the same way; this is the last consumer that did not.
+            if (isinstance(resets, (int, float))
+                    and isinstance(span_s, (int, float)) and span_s > 0):
+                begins = resets - span_s
             if begins is not None and begins > now:
                 where = (f"line {m0:5.1f}% (floor) | window starts in "
                          f"{human_delta(begins - now)}")
@@ -2842,12 +2851,23 @@ def cmd_burn(bin_minutes):
     return 0
 
 
-def cmd_plot(out, days, m0, m1, band):
+def cmd_plot(out, outdir, days, m0, m1, band):
     """Draw the log against a pace line -- this folder's, unless overridden.
 
     The three geometry arguments arrive as None when the flag was not given,
     which is the only way to tell "the user asked for m0=5" from "the user
     asked for nothing" once the default stopped being a constant.
+
+    `out` and `outdir` arrive as None the same way, and the figure defaults
+    into this account's DATA_DIR rather than the current folder. The folder a
+    `plot` runs in is normally a repository someone is working in, and a png
+    appearing there mid-task is noise an agent has to reason about; it is also
+    not really the user's file, but a view of account state that happened to
+    be rendered from there. It goes where the state it draws already lives.
+    `--dir .` asks for the old behaviour, `--out` names an exact path and wins
+    over both, because scripts pass it and it has to keep meaning what it
+    says. Writing somewhere other than the current folder is only safe because
+    `render` prints the absolute path it wrote.
     """
     from . import plot as plotmod
     here = norm_path(os.getcwd())
@@ -2877,6 +2897,18 @@ def cmd_plot(out, days, m0, m1, band):
         print(f"  plotting {len(kept)} of {len(records)} samples "
               f"-- the last {days:g} {unit} of the log")
     series = plotmod.collect(kept, parse_usage)
+    # Resolved here rather than in the parser so `--out` can win over `--dir`
+    # explicitly; a parser default would make the two indistinguishable.
+    #
+    # Nothing is assumed about DATA_DIR being present or writable. An earlier
+    # version of this comment argued it must exist because `load_log` reads
+    # from it -- true, but it also claimed an empty log never reaches a
+    # render, which is false: `render` IS reached and returns 1 at its
+    # no-panels guard. Rather than rest on an invariant in another module,
+    # `render` now guards the write itself and reports what it could not do.
+    if out is None:
+        out = os.path.join(outdir if outdir is not None else DATA_DIR,
+                           "niceclaude-usage.png")
     return plotmod.render(series, out, m0, m1, band)
 
 
@@ -3418,6 +3450,15 @@ actually brakes your agents is nearly spent. A final panel overlays every
 window on its own progress, where the diagonal IS the pace line and anything
 above it was over budget whichever window it came from.
 
+The figure is written beside this account's state -- the same directory as
+usage.jsonl and state.json -- rather than into the folder you ran from. That
+folder is usually a repository you are working in, and a stray
+niceclaude-usage.png appearing in it mid-task is noise; the chart is a view of
+account state rather than a file of yours. The absolute path is printed, so
+you can click or paste it. `--dir .` writes into the current folder instead,
+`--dir DIR` into any other, and `--out FILE` names an exact path and wins over
+both.
+
 `--days N` plots only the tail of the log: `--days 7` for the last week,
 `--days 30` for the last month, fractions allowed (`--days 0.5` is twelve
 hours). The whole log is the default, which on a long-running daemon is
@@ -3462,6 +3503,7 @@ The daemon and the hook never import it, so nothing else pays for it.
   niceclaude plot                       # the whole log, drawn against this
                                         # folder's own m0/m1/band
   niceclaude plot --days 7              # the last week
+  niceclaude plot --dir .               # into the current folder instead
   niceclaude plot --days 30 -o month.png
   niceclaude plot --days 1 --m0 10      # redraw a day against a line
                                         # you are considering
@@ -3692,9 +3734,12 @@ def build_parser():
                     metavar="MINUTES",
                     help="width of the smoothing bin (default: %(default)s)")
     pl = _command(sub, "plot")
-    pl.add_argument("-o", "--out", default="niceclaude-usage.png",
-                    metavar="FILE",
-                    help="where to write the image (default: %(default)s)")
+    pl.add_argument("-o", "--out", default=None, metavar="FILE",
+                    help="exact path to write (overrides --dir)")
+    pl.add_argument("--dir", default=None, metavar="DIR", dest="outdir",
+                    help="directory to write niceclaude-usage.png into "
+                         "(default: this account's data directory; "
+                         "--dir . for the current folder)")
     pl.add_argument("--days", type=positive_days, default=None, metavar="DAYS",
                     help="plot only the last DAYS days of the log, counted "
                          "back from the newest sample rather than from now "
@@ -3781,7 +3826,7 @@ def main(argv=None):
     if a.cmd == "burn":
         return cmd_burn(a.bin_minutes)
     if a.cmd == "plot":
-        return cmd_plot(a.out, a.days, a.m0, a.m1, a.band)
+        return cmd_plot(a.out, a.outdir, a.days, a.m0, a.m1, a.band)
     return 1
 
 
