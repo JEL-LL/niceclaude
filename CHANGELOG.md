@@ -34,6 +34,42 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **Holds are materially shorter: a brake earned by one window is no longer run
+  down to another window's throttle line.** The memory that carries a hold down
+  through the band used to be one flag for the whole verdict, discharged
+  against whichever banded bucket woke last — so a session brake was run down
+  to the *weekly* throttle whenever the week happened to be sitting in its
+  band, which is hours rather than minutes and up to 13.5 of them at the
+  shipped band of 7 points. In one measured case — the session 30% against its
+  own line of 22.4%, the week 50% against a weekly line of 52.0% — a session
+  brake that solved to 0.9 hours still had 11.1 hours to run half an hour
+  later, and by an hour in the session was free and unmentioned in the reason,
+  the agent held solely by a band it had wandered into. If a paced folder has
+  been managing one expensive step a day, this is why: a hold that long
+  outlives the 5-hour session window, so the window expires unused, the next
+  step is cache-cold and therefore big, and it opens a fresh window whose line
+  starts at the `m0` grubstake — which that step is instantly over, earning the
+  next latch. Each bucket now runs down to its own throttle line and no
+  further, and no other bucket inherits that descent.
+
+  Two things to know before upgrading. A hold that opens `brake` now commonly
+  ends on a leftover band, logged **`band-release-after-descent`** — a reason of
+  its own, because such a band is charged
+  `max(0, band_delay - (time already held))`, nothing at all for a descent
+  longer than the knob, so the duration printed beside it can be many times the
+  `band_delay` that a plain `band-release` would have named. And a descent
+  whose own bucket stops being readable now ends `blind-release` at
+  `blind_delay`, where a sibling's band reading used to keep it confident for
+  as long as that sibling's own wake was ahead. That narrowing is the point of
+  the change rather than a side effect: a reading of one bucket never said
+  anything about another one's descent.
+
+  `niceclaude status` has no memory of where a hold began — it is one shot — so
+  mid-descent it reports the throttle of that instant, one `band_delay` per
+  tool call (`3m00s` at the default), while the hook holds hard for the rest of
+  the descent. The two could always disagree there; it is no longer an edge
+  case, and `hook.log` is the record of what the hook actually did.
+
 - **`plot` prints the absolute path it wrote**, rather than the argument it
   was given -- which defaults to the bare `niceclaude-usage.png` and so named
   nothing usable from anywhere but the directory the command ran in. The line

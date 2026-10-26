@@ -3,14 +3,25 @@
 `hard` -- the running-down latch -- is one boolean for the whole verdict while
 the pace lines are per bucket. A hold earned by the session crossing its brake
 line is discharged against whichever banded bucket wakes LAST, which on the
-weekly line is hours to days.
+weekly line is hours.
 
 Symbols are cited by name, not line number. Test docstrings cite decisions
 (L-numbers), never review-round finding numbers.
 
-**Status: part A implemented, uncommitted. Scope was part A only** -- the
-in-process fix. Publishing the latch so `status` can show it (B) and a CLI to
-clear it (C) are deliberately not here; see section 5.
+**Status: part A committed as `f93bdcd`; the docs phase (section 4a) is done.
+Scope was part A only** -- the in-process fix. Publishing the latch so `status`
+can show it (B) and a CLI to clear it (C) are deliberately not here; see
+section 5.
+
+Docs phase done: `README.md`, `CHANGELOG.md`, `design-decisions.md` §4a, §22
+and the new §24, `test-matrix.md` cases 20-21, and this file in
+`harness/README.md`.
+
+The docs phase corrected one figure in this file: the problem statement
+above read "hours to days". The discharge ceiling is one full band of weekly
+line, `band * 7 * 86400 / (100 - m0 - m1)` -- **13.5h** at the shipped
+margins, and 29.8h at the reporting user's wider m0 20 / m1 1 / band 14,
+which is where "days" came from.
 
 Touched: `src/niceclaude/hook.py`, `tests/test_niceclaude.py`,
 `tests/test_blind_delay.py`, and E10's heading in `expired-window-plan.md`.
@@ -56,8 +67,8 @@ HEAD's `decide`. The jitter zone is the fourth parametrize case of
 `test_only_a_bucket_with_a_real_wake_latches`, with the hot-sibling-alone
 contrast; it is the only case that dies under the "gate on saw-a-line,
 dropping the wake-still-ahead half of `h[3]`" mutation. After round 2: 961
-passed, 5 skipped. README and CHANGELOG still owe the new release label
-(the deferred docs phase).
+passed, 5 skipped. The new release label reached README and CHANGELOG in the
+docs phase recorded above.
 
 ---
 

@@ -160,11 +160,16 @@ which is also what a correct release says. The feature evaporates and leaves no
 trace that it did.
 
 `bucket_pace` returning the right wake time is not enough, because nothing ever
-gets to use it. The memory has to live in `run`, which latches "this hold began
-above the brake line" and passes it back into `decide`. A hold that began above
-the line runs all the way down; a hold that wandered into the band from below is
-a lower gear and costs one `band_delay`. Same region, opposite answers — and the
-only thing that can tell them apart is where the hold started.
+gets to use it. The memory has to live in `run`, which latches the KEY of every
+bucket it has seen above that bucket's own brake line and passes the set back
+into `decide`. A bucket that began above its own line runs all the way down to
+its own throttle; a bucket whose band was wandered into from below is a lower
+gear. Same region, opposite answers — and the only thing that can tell them
+apart is where the hold started.
+
+What the lower gear costs is one `band_delay` per tool call — for a hold that
+was soft from the start. A band inherited at the END of a descent is charged
+`max(0, band_delay - (now - brake_start))` instead (§24).
 
 The testing lesson generalises: every test of a controller that samples a single
 instant, or starts the loop already in its steady state, is blind to this entire
@@ -907,9 +912,10 @@ with no key gets 240. That is the behaviour change, and it is intended.
 > A hard hold is blind if and only if no bucket that governs it has a wake
 > strictly in the future that its reading supports.
 
-The governing buckets are the hot ones, plus the banded ones once the hold is
-latched (a descent from over the line is still owed). An unusable bucket, or
-one over the `m0` floor with no reset clause, supports no wake. Nor does a wake
+The governing buckets are the hot ones, plus the banded ones whose OWN key is
+latched — that bucket's descent from over its own line is still owed, and no
+other bucket's is (§24). An unusable bucket, or one over the `m0` floor with
+no reset clause, supports no wake. Nor does a wake
 at or before now: `bucket_pace` clamps every wake to its window's reset, so a
 past one means the window has reset since the reading and the reading bounds
 nothing. That gives three blind holds, `no usable buckets in snapshot`,
@@ -926,12 +932,13 @@ does not touch it; only `max_delay` does. The asymmetry runs the other way in
 the soft-band branch, which is the one place `decide` refuses stale data,
 because a band hold is a kind of proceeding.
 
-**Only a non-blind hold latches.** `run`'s `hard` latch is what carries a hold
-down through the band. A blind hold is hard too, but it never saw the brake
-line, so it has nothing to run down from. Latched, the next pass would let any
-band bucket with a future wake "justify" it as a descent, un-blind it, reset
-the blind clock and hold until that band wake, which on the weekly line is
-hours. A hold that did begin over the line keeps its latch through a later
+A blind hold latches nothing, and so has nothing to run down from: a key is
+published only for a bucket judged over its own brake line with its own wake
+still ahead, which is the conjunction this rule reads. The trap that matters —
+a band bucket with a future wake "justifying" a descent the hold never earned,
+un-blinding it and resetting the blind clock — cannot be built at all once a
+latch is discharged only against its own bucket (§24). A bucket that did
+cross keeps its latch through a later
 blind spell: the descent is still owed.
 
 **The clock is per invocation.** `blind_start` in `run` measures continuous
@@ -1051,3 +1058,67 @@ Rejected:
 - *A void state of its own for a window that has not begun.* It needs no new
   state: "no usable window position" is precisely what the `m0` floor exists
   for, and a second one would be surface for no evidence.
+
+---
+
+## 24. A descent is owed to the bucket that earned it
+
+`hard` was one boolean for the whole verdict while the pace lines are per
+bucket. `decide`'s running-down branch discharged it against `max(h[2] for h in
+banded)` -- whichever banded bucket woke last -- so a hold earned by the
+session crossing its own brake line was run down to the WEEKLY throttle
+whenever the week happened to be sitting in its band. In one measured case at
+the shipped margins -- the session 30% against its own line of 22.4%, the week
+50% against a weekly line of 52.0% -- a brake that solved to 0.9h still had
+11.1h to run half an hour later, and by an hour in the session was free and
+gone from the reason: the agent was held solely by a band it had wandered into.
+
+`hard` is now `latched`, a set of bucket KEYS. `decide`'s hot branch publishes
+the keys it judged over their own brake lines, `run` accumulates them across
+the invocation, and the running-down branch takes `due` -- the latched subset
+of `banded` -- and runs to `max(h[2] for h in due)`. `bucket_pace` already
+solved every bucket's release against its own throttle line, so nothing new is
+computed here; the defect was only `decide` aiming at the wrong one. The full
+record is `per-bucket-latch-plan.md` (§1.1 for the cycle that re-armed the
+latch on the next tool call, L1-L7 for the decisions).
+
+**Only a bucket with a real wake latches.** The key comes from the hot branch
+alone and only for an entry whose own wake is still ahead -- the same
+conjunction THE BLIND RULE reads (§22). An unusable, expired or floor-judged
+entry never saw a brake line and so owes no descent; a reading in the jitter
+zone did see one, but its elapsed is clamped and it solves no instant to run
+down to. Every other branch publishes an empty latch, which is what made
+`run`'s old `not soft and not blind` guards redundant: a soft or a blind
+verdict now carries nothing to latch, and the trap they were written for -- a
+blind hold latching and then being "justified" by any band bucket's future
+wake -- cannot be built out of a latch that is discharged only against its own
+bucket.
+
+§4a's hysteresis guarantee survives per bucket, and loses only its export to
+buckets that never crossed anything (L5, L6).
+
+**Two consequences a user sees.** A descent now commonly ends with an unlatched
+sibling still in its band, which is a soft hold -- priced as §4a prices a band
+inherited at the end of a descent, nothing at all once that descent has outrun
+the knob -- and released under a label of its own,
+`band-release-after-descent`. That label is
+gated on the latch rather than on how the hold opened, so a hold that opened
+blind and later became an ordinary throttle keeps the plain `band-release`. And
+some holds that were confident are now blind, bounded by `blind_delay` (§22),
+because a sibling's band reading supports nothing. The doctrine survives where
+it is honest: a stale reading of the latched bucket ITSELF still supports its
+own descent (§12).
+
+Rejected:
+
+- *One latch, gated on "any banded bucket has a supported wake".* That is the
+  defect with per-bucket plumbing around it: the hold is still discharged
+  against a bucket that earned nothing.
+- *Giving `status` a latch of its own so that it stops disagreeing.* A one-shot
+  command would have to invent where the hold began, and one that guessed would
+  disagree with the hook in the other direction and more often (L7). The
+  disagreement it keeps is no longer an edge case -- mid-descent, `status`
+  prices that instant as a throttle of `band_delay` per call while the hook
+  holds hard to the earner's own throttle line -- and the latch the hook
+  actually holds is what `per-bucket-latch-plan.md`'s part B, publishing it
+  so `status` can show it, would publish.

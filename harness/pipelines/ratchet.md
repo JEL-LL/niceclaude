@@ -228,11 +228,14 @@ cheaply demonstrated should be written weaker or omitted.
 
 Two corollaries, both earned the hard way on the same run:
 
-- **Numbers are the worst offenders, because they look checked.** Three
-  separate figures were computed at the *reporting user's* configured margins
-  and then stated as general facts. One propagated out of the plan into a
+- **Numbers are the worst offenders, because they look checked.** The same
+  mistake recurred through every phase of that work and the one after it:
+  figures computed under some non-default configuration -- one user's
+  margins, a walkthrough's lowered knob -- then stated as general facts. One propagated out of the plan into a
   committed code comment and from there into a design-decisions section before
-  anyone recomputed it. Where the number is not the point, write the
+  anyone recomputed it; another survived three review rounds and a gate. The
+  tell is a bare value in prose that nobody re-derived at the shipped
+  defaults. Where the number is not the point, write the
   expression (`100 - m1`) rather than the value.
 - **Re-measure before briefing anyone, including an expert.** A second-model
   adjudication was once dispatched with "measured on the current tree" figures

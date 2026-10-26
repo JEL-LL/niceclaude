@@ -75,6 +75,15 @@ printf '{"cwd":"/tmp/tp","hook_event_name":"PreToolUse"}' | timeout 3 niceclaude
 | 17 | session **3%**, `resets_epoch` = now minus 52h; `--blind-delay 5`, `NICECLAUDE_BIN=/bin/false`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — the window rolled under the reading, so it is void; `hook.log` reads `session: window reset since this reading` then `release ... (blind-release)` |
 | 18 | session **50%**, `resets_epoch` = now + 20h (a 5h window that has not begun); `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — judged against the `m0` floor with no wake to solve, so blind; `hook.log` reads `session 50% over floor 5%` — a brake reason, where the old code counted down a confident 18h hold |
 | 19 | session **50%**, `"window_seconds": "18000"` (quoted); `--blind-delay 5`, `timeout 15` | `/tmp/tp` | **allow after ~5s** — a non-numeric window length takes the same floor; `hook.log` reads `session 50% over floor 5%` then a `(blind-release)`, and never `ERROR ... -- failing open`, which would mean the hook raised and the folder ran unpaced |
+| 20 | session **50%**, `"window_seconds": 600`, `resets_epoch` = now + 305 (line 50.0%, throttle 43.0%, so just over); `week:all models` **50%**, `resets_epoch` = now + 278069 (line 52.0%, throttle 45.0% — in its band, never crossed); `on /tmp/tp --band-delay 5`, `timeout 120` | `/tmp/tp` | **allow after ~70s** — the hold is the session's own descent to the session throttle line, and ends there; `hook.log` ends `release ... (band-release-after-descent)`. The week's own throttle crossing is 11.6h out, and that is what the old code ran down to |
+| 21 | as 20, but `--band-delay 90`, `timeout 180` | `/tmp/tp` | **allow after ~90s**, not ~160s — the band the descent is left sitting in costs `max(0, band_delay - (now - brake_start))`, so the whole hold is one `band_delay`, not a descent plus a fresh one |
+
+Cases 20 and 21 are the only ones here whose fixture has a deadline: the
+session is over its line for 22s after you write it, and then its own brake
+line rises past the reading. Drive the hook inside that window. Miss it and
+the session is already in its band, nothing latches, and the run ends in a
+plain `band-release` with exit 0 -- the same exit code as a pass, which is
+why this is worth saying rather than leaving to the reader's clock.
 
 Case 3 guards component-wise prefix matching. Case 10 guards the fail-safe
 exception in `design-decisions.md` §11 — the naive version brakes hardest
@@ -123,7 +132,22 @@ and its handoff to the staleness gate, every non-numeric `state.json` field
 returning rather than raising, and the `status` rows for a void window and for
 one that has not begun.
 
-Latency should be **~20ms** for every allow case except 13, 14 and 17–19.
+Cases 20–21 re-check the per-bucket latch (`design-decisions.md` §24), and
+both are watched on a wall clock: what they test is which instant a hold is
+aimed at, which no exit code reports. The session fixture's 600-second window
+is the one artificial part, and it is there to make the descent watchable — it
+puts the whole 5→92% climb of the brake line into ten minutes, so the
+seven-point descent takes under a minute instead of twenty-four. Nothing
+refreshes underneath them: a fixture written just before the run stays inside
+`MAX_STALE` for the whole hold, so what you are reading is the hook deciding on
+the numbers you wrote. Put the default back afterwards with `niceclaude on
+/tmp/tp --band-delay 180`. The automated cover is in `tests/test_niceclaude.py`
+and `tests/test_blind_delay.py`: the motivating scenario itself, a crossed
+bucket running down to its own throttle, the wake target across the whole
+over-to-band crossing rather than at one instant, the soft cap's own release
+label, and which entries may arm a latch at all.
+
+Latency should be **~20ms** for every allow case except 13, 14 and 17–21.
 
 ---
 

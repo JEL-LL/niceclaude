@@ -20,6 +20,7 @@ Everything here is technical and public-safe.
 | `model-detection-plan.md` | Plan for detecting the model per hook call (`open-questions.md` §9) |
 | `blind-delay-plan.md` | Plan for `blind_delay`, the bounded wait on a hold that cannot see (`design-decisions.md` §22) |
 | `expired-window-plan.md` | Plan for voiding a reading whose window has rolled, rather than extrapolating it (`design-decisions.md` §23) |
+| `per-bucket-latch-plan.md` | Plan for owing a descent to the bucket that earned it, instead of to every banded bucket (`design-decisions.md` §24) |
 
 ## The one-paragraph summary
 

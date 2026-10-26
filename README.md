@@ -484,13 +484,47 @@ Three regions, judged against `pess`:
 | region | when | what happens |
 |---|---|---|
 | free | `pess <= low` | full speed, no hold |
-| band | `low < pess <= allowed` | one `band_delay` per tool call |
+| band | `low < pess <= allowed` | one `band_delay` per tool call, less at the end of a descent (below) |
 | over | `pess > allowed` | hold until the **throttle** line catches up |
 
 Both braking regions aim at the same target, the throttle line; the brake line
 only decides whether the hold is capped. That is where the money is. One hold
 now buys a whole band of running instead of one quantum, so the cold re-read
 amortises over the band rather than over the tick.
+
+### A hold runs down to the line that stopped it
+
+Every bucket has its own pair of lines, and a hold that began over one bucket's
+brake line runs down to *that* bucket's throttle line and no further. It used to
+run down to whichever banded bucket woke last, which on the weekly line is a
+different order of magnitude. In one measured case — the session 30% against
+its own line of 22.4%, the week 50% against a weekly line of 52.0% it had
+wandered into rather than crossed — a session brake that solved to 0.9 hours
+still had 11.1 hours to run half an hour later. At that same instant it now has
+0.4 hours left, which is the rest of the session's own descent.
+
+Which is why the `band_delay` in the table above is the full price only for a
+hold that was in the band from the start. A band left over at the end of a
+descent is charged `max(0, band_delay - (time already held))` — nothing at all
+for any descent longer than the knob — because the cap counts from the start of
+the whole hold, not from the moment the band was entered.
+
+So `hook.log` reads differently in two ways. A hold that opens `brake` now
+usually ends on a band some other bucket is sitting in, under a reason of its
+own — and since a descent that has outrun the knob is charged nothing for that
+band, the duration printed beside it is the descent itself, which can be many
+times the `band_delay` a plain `band-release` would have named. The 0.9-hour
+descent above, at the default three minutes:
+
+```
+2026-10-26T13:25:16Z release cwd=/home/you/projects/nightly after 3228s (band-release-after-descent)
+```
+
+And a descent whose own bucket stops being readable — its window rolls under the
+reading, or its percentage stops parsing — now ends `blind-release` at
+`blind_delay`, where a sibling's band reading used to keep it confident for as
+long as that sibling's own wake was still ahead. A reading of one bucket never
+said anything about another one's descent.
 
 ### The two knobs are orthogonal
 
@@ -512,9 +546,10 @@ cache TTL, so the crawl stays warm. Both numbers are in `defaults`, so
 `niceclaude on ... --band 0 --no-band-delay` is how one folder opts out.
 
 `--max-delay` is unchanged and keeps its old meaning, which makes four corners
-worth knowing. Over the brake line with no cap, the hook holds until the
-throttle line catches up; with a cap it holds that long and then proceeds while
-still over the line, as before. Inside the band a hold costs `band_delay`, or
+worth knowing. Over the brake line with no cap, the hook holds until that
+bucket's throttle line catches up; with a cap it holds that long and then
+proceeds while still over the line, as before. Inside the band a hold costs
+`band_delay` — less whatever a descent has already spent, as above — or
 `min(band_delay, max_delay)` where the cap is the smaller; with `band_delay`
 null, nothing holds at all. The two are not alternatives — the
 tighter one wins.
@@ -669,9 +704,14 @@ out while it waits.
 
 The verdict line comes from the hook's own `decide()` rather than a second copy
 of the arithmetic, so `status` cannot report `running` while the hook is holding
-the agent. When the snapshot is too stale to trust, it says `BRAKED, blind` and
-prints no release time, because there is none to solve for; it says instead
-when `blind_delay` will let the call through.
+the agent. What it cannot do is price a *descent*: it is one shot and has no
+memory of where a hold began, so an agent part-way down to its own throttle line
+is priced as the instant — one `band_delay` per tool call, the band it is
+sitting in — where the hook will hold on until that line catches up, and
+`hook.log` is the record of what the hook actually did. When the snapshot is too
+stale to trust, it says `BRAKED, blind` and prints no release time, because
+there is none to solve for; it says instead when `blind_delay` will let the call
+through.
 
 ### A reading whose window has rolled
 
