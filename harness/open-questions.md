@@ -691,3 +691,94 @@ Open design questions, none of them hard:
 
 Small, self-contained, and wants no control-law thought. Worth doing next to
 whichever change touches `plot` or `cli.py`'s parser anyway.
+
+---
+
+## 23. Per-window `m0` and `m1`, and the missing "unset" verb — OPEN
+
+Filed 2026-10-26, from the author: "I want to be able to set m0 and m1
+separately for the different things but I don't want to have to."
+
+**Why it is wanted, in this file's own data.** §3 records the weekly line as
+the real governor -- duty cycle 5-7% against the session line's 62% -- and
+concludes "tuning session margins is close to pointless; weekly margins are
+what matter." One `m0`/`m1` pair per folder means tuning both together, which
+is tuning the wrong one.
+
+### The shape: one more link on a cascade that already exists
+
+Margins resolve `rule -> defaults -> built-in` today, inline in `decide`:
+`coerce_num(entry.get("m0", defaults.get("m0", DEFAULT_M0)), DEFAULT_M0)`.
+What is wanted is `window-scope -> rule -> defaults -> built-in`:
+
+```json
+"/home/me/proj": {
+  "paced": true,
+  "m0": 5, "m1": 8,
+  "windows": { "week": {"m1": 0.5}, "session": {"m0": 20} }
+}
+```
+
+Four decisions make it "do not have to" rather than "have to":
+
+- **Resolve each key independently, never as a block.** `windows.week.m1` set
+  alone must leave `m0` falling through. Fetching a scope *object* and using
+  it when present builds an all-or-nothing override, and the user is back to
+  specifying everything.
+- **Key by window KIND, not by bucket key** -- `session` / `week` / `model`,
+  the vocabulary `DEFAULT_ENFORCE` already defines. Literal bucket keys are
+  server-supplied and unstable; `model_matches` exists precisely because
+  "week:Sonnet only" and "week:(Fable)" are not predictable. A second
+  vocabulary for the same three things will drift from the first.
+- **Extend the existing resolver, do not write a parallel one.** Add a scope
+  argument to the `off_or_num`/`coerce_num` lookup. This repo has paid for
+  that lesson twice: `bucket_pace` was centralised so `status` could not
+  disagree with the hook, and `RESET_JITTER` shipped as two copies that review
+  had to merge.
+- **Say what a present `null` means in a scope.** `off_or_num` exists because
+  for `band_delay` a written `null` means OFF while an absent key means
+  inherit. For a margin "off" is meaningless, so `coerce_num`'s simpler
+  cascade is right -- but state it, because the two resolvers side by side
+  invite the wrong one.
+
+### The hard part, and it is pre-existing
+
+The author asked the question that exposes it: *"once I have set a separate
+slope for the 5 hr window, how do I remove it so that it falls through?"*
+
+**There is no answer today, for any knob.** `niceclaude on` has `--no-max-delay`,
+`--no-band-delay` and `--no-blind-delay`, and every one of them writes an
+explicit `null`, which means OFF. Not one of them DELETES a key, which is what
+"fall through to the level above" requires. `grep` for an unset/clear/inherit
+flag in `cli.py` finds nothing. The only way back to inherited behaviour is to
+hand-edit `policy.json`.
+
+So the cascade needs **three states, not two**: set, explicitly off, and
+unset -- and the CLI currently expresses only the first two. Adding a scope
+level without an unset verb makes a one-way door: every per-window margin a
+user tries is permanent until they open the JSON.
+
+Options for the verb, none chosen:
+
+- A general `niceclaude on . --unset week.m0`, which solves it once for every
+  scoped knob rather than growing one flag per knob. Most surface, least
+  repetition.
+- Per-knob `--inherit-week-m0`, matching the existing `--no-X` shape. Reads
+  consistently with what is there; multiplies flags by scopes.
+- An empty value, `--week-m0 ''`, meaning delete. Fewest flags, but it
+  overloads a value slot with a verb and is easy to pass by accident.
+
+Whichever is chosen should probably be retrofitted to the existing `--no-X`
+knobs too, since "turn it off" and "go back to inheriting" are genuinely
+different operations and the tool can currently only say the first.
+
+### Open design question, worth a second opinion before code
+
+`fanout_reserve` already ADDS to `m1` on `SubagentStart`, so there is a
+precedent for `m1` varying by context. The resolution order needs deciding:
+does a per-window `m1` replace the rule's and *then* take the fan-out reserve
+on top, or is the reserve applied first? Both are defensible and they differ
+materially for a folder that tunes `week.m1` low.
+
+`status` would also need to show which margins are in force per row -- the
+table already prints a line per bucket, so the column exists.
