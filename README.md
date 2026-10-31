@@ -837,9 +837,10 @@ it, and resolves a relative one against wherever a session starts, so `status`
 warns about either.
 
 One limit: the account is read from the environment. A hook that has lost
-`CLAUDE_CONFIG_DIR` is keyed as the default account. Whether that can happen
-(`claude --config-dir`, or `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) is unverified
-until Procedure B in `harness/open-questions.md` §10 is run.
+`CLAUDE_CONFIG_DIR` is keyed as the default account. That happens when a
+session is started with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, which strips the
+variable from hooks, so don't combine that setting with a second account
+(`harness/open-questions.md` §10).
 
 **Upgrading.** Stop every daemon first, including any started under another
 account, and restart them after; see the CHANGELOG. If you ran one non-default

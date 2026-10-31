@@ -6,8 +6,9 @@ every decision stated, how the open questions were settled, and the phases to
 build it in. Symbols are cited by name, not line number, so this survives
 edits to the code it describes.
 
-**Status: Phases 1–4 built; D10 (the payload fallback) deferred until Phase 0
-Procedure B has run; the former Phase 5 dropped (Q4).** The plan was revised
+**Status: Phases 1–4 built; Phase 0 Procedure B has run and shows D10 (the
+payload fallback) is needed under `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (X3),
+but D10 is not yet built; the former Phase 5 dropped (Q4).** The plan was revised
 after seven reviews before any of it was built. The review log is at the end.
 
 **Test baseline before any change:** 499 passed at 543dd4d, which includes
@@ -955,10 +956,20 @@ one needed no login, and the other found the default dir's login
   writes `~/.claude/.claude.json`, creating it if missing, and does **not**
   read `~/.claude.json`.
 
-**Until Procedure B has run, the implementation assumes:**
+**Procedure B has run** (2.1.314, Linux, a second login;
+`platform-findings.md` §15, X3 below):
 
-- the hook inherits `CLAUDE_CONFIG_DIR` unchanged, so D10's payload fallback
-  stays unbuilt. This is verified for the default dir, not yet for another.
+- `CLAUDE_CONFIG_DIR=<dir>`: the hook sees it verbatim, in the parent and in
+  the subagent. `.claude.json` is `<dir>/.claude.json`.
+- With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, the hook does **not** see it.
+  `transcript_path` still lies under `<dir>/projects`, so D10's walk recovers
+  the right dir.
+- `--config-dir` is not listed by `claude --help` in 2.1.314, so it was not
+  checked.
+
+So the implementation's assumption that the hook inherits `CLAUDE_CONFIG_DIR`
+unchanged holds without the scrub and fails with it. D10's payload fallback is
+needed for the scrub case. It is not built yet, pending discussion.
 
 Verified by Phase 0: `.claude.json` lives at `$CLAUDE_CONFIG_DIR/.claude.json`
 when the variable is set, even to the default dir, and at `~/.claude.json`
@@ -1096,9 +1107,11 @@ Each assumption is marked in the code where it is relied on.
   holds; the D11 filter in `load_log`; the conftest fixture and marker; the
   stamp in `smoke_installed.py`; `tests/test_account_stamp.py` and
   `tests/test_log_filter.py`.
-- **D10 deferred.** Phase 0 Procedure B has not run (filed as §10 of
-  `harness/open-questions.md`, for a machine with two logins), so nothing yet
-  shows a hook can lose `CLAUDE_CONFIG_DIR`. The payload fallback,
+- **D10 deferred.** When this phase was built, Phase 0 Procedure B had not
+  run (filed as §10 of `harness/open-questions.md`, for a machine with two
+  logins), so nothing yet showed a hook can lose `CLAUDE_CONFIG_DIR`. It
+  since has: the scrub drops it (X3), so D10 is now needed, but it is still
+  unbuilt. The payload fallback,
   `CONFIG_DIR_OVERRIDE` and its tests are not built, the conftest fixture
   does not pin an override that does not exist, and the `ASSUMPTION (Phase 0,
   unverified)` comment at `_shared.ACCOUNT_KEY` stands as written.
@@ -1792,3 +1805,29 @@ F10 require, the key follows what Claude does.
   - Phase 3 notes that its reader (W2) may find a fresh file without
     `oauthAccount` and report `account: None`. That is diagnostic only and
     acceptable, and a test is added.
+
+### Phase 0 Procedure B: X3
+
+Procedure B ran on Claude Code 2.1.314, Linux, against a second login
+(`platform-findings.md` §15).
+
+- **X3 — the scrub drops `CLAUDE_CONFIG_DIR` from hooks.** Refuted in part:
+  "the hook inherits `CLAUDE_CONFIG_DIR` unchanged". It holds for a
+  non-default dir without the scrub. With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`,
+  every hook event (the parent's `PreToolUse`, and the subagent's
+  `SubagentStart` and `PreToolUse`) saw the variable unset, while the session
+  ran on the second login.
+  - Today such a hook is keyed as the default account. It paces against the
+    default account's snapshot and writes to the default account's
+    `hook.log`.
+  - `transcript_path` was `<dir>/projects/<slug>/<session>.jsonl` in every
+    event, so D10's nearest-`projects` walk gives `<dir>`. D10's precedence
+    (the environment wins; the payload only fills in) survives: without the
+    scrub the two agree, and with it the environment is empty.
+  - D10 is therefore needed for the scrub case. Building it is a code change,
+    and it waits for a decision. Until then, the `ASSUMPTION (Phase 0,
+    unverified)` comment at `_shared.ACCOUNT_KEY` stands, and the gap is
+    filed as `open-questions.md` §10.
+  - `.claude.json` was `<dir>/.claude.json` with and without the scrub, which
+    matches the verified rule. `--config-dir` is not in `claude --help` in
+    2.1.314, so the third check was not run.

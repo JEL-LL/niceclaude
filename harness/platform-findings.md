@@ -436,7 +436,7 @@ unnoticed.
 Observed on Claude Code **2.1.282**, Windows 10, on the default account. This
 is Phase 0 of `per-account-state-plan.md`: Procedure A with `CLAUDE_CONFIG_DIR`
 unset, then the two Procedure B checks that point at the default dir. The rest
-of Procedure B is pending, below.
+of Procedure B ran later on Linux against a second login; it is at the end.
 
 A probe hook, registered for `PreToolUse` and `SubagentStart` through
 `claude --settings probe.json -p ...`, appended one line per event holding
@@ -549,27 +549,60 @@ Claude resolves a literal `~` against the cwd, and `norm_path`'s
 someone logs in there; then that session's hooks would be keyed as the
 default account.
 
-**Pending: Procedure B (needs the user).** Checks against a non-default dir
-need a second login, from `claude /login` in a scratch dir or a second
-account. Then, with the same probe:
+**Procedure B against a second login.** Observed on Claude Code **2.1.314**,
+Linux, on a machine with two logins. The second account's config dir is
+`~/.claude-work`, a separate login, not a copy of the default one. Same probe
+and same prompt as Procedure A (one Bash command, then one subagent that ran
+one), from an empty scratch dir under `/tmp` that no niceclaude policy covers.
+File checks were listings and mtimes only, never contents. Here `~` is
+`/home/<me>`, and `<slug>` is the scratch dir's project slug.
 
-- `CLAUDE_CONFIG_DIR=<dir>`: does the hook see it? Also check where
-  `.claude.json` is written.
-- `CLAUDE_CONFIG_DIR=<dir>` with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`: does the
-  hook still see it?
-- `claude --config-dir <dir>`, but only if `claude --help` lists the flag. It
-  does not in 2.1.282.
+```
+1. CLAUDE_CONFIG_DIR=~/.claude-work
+{"CLAUDE_CONFIG_DIR": "~/.claude-work", "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/ab5424b5-....jsonl"}
+{"CLAUDE_CONFIG_DIR": "~/.claude-work", "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/ab5424b5-....jsonl"}
+{"CLAUDE_CONFIG_DIR": "~/.claude-work", "hook_event_name": "SubagentStart", "transcript_path": "~/.claude-work/projects/<slug>/ab5424b5-....jsonl", "agent_id": "ae4b0bf79c9501cdb"}
+{"CLAUDE_CONFIG_DIR": "~/.claude-work", "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/ab5424b5-....jsonl", "agent_id": "ae4b0bf79c9501cdb"}
 
-Until then, the implementation assumes:
+2. CLAUDE_CONFIG_DIR=~/.claude-work CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/be54c1ab-....jsonl"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/be54c1ab-....jsonl"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "SubagentStart", "transcript_path": "~/.claude-work/projects/<slug>/be54c1ab-....jsonl", "agent_id": "ab1a8b3cad7350c1a"}
+{"CLAUDE_CONFIG_DIR": null, "hook_event_name": "PreToolUse",    "transcript_path": "~/.claude-work/projects/<slug>/be54c1ab-....jsonl", "agent_id": "ab1a8b3cad7350c1a"}
+```
 
-- the hook inherits `CLAUDE_CONFIG_DIR` unchanged, so D10's payload fallback
-  stays unbuilt. This is verified for the default dir in both spellings
-  above, but not yet for a non-default dir or under the scrub.
+Both runs exited 0, and the tool order was the same as in Procedure A.
+
+- **Without the scrub, the hook sees a non-default value verbatim**, in the
+  parent and the subagent alike. The assumption in `_shared.py` holds here.
+- **With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, the hook loses it.** It is
+  absent in all four events. The session itself still ran on the second
+  login, and its transcript still went under `~/.claude-work/projects`. Only
+  the child processes lose the variable. The Bash tool loses it too: a
+  separate run of `printenv CLAUDE_CONFIG_DIR CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`
+  under the scrub printed only `1` and exited 1. So under the scrub, a hook
+  that reads only the environment keys a second account's session as the
+  default account.
+- **`transcript_path` still names the right config dir under the scrub.** It is
+  the parent of the nearest `projects`, as D10 assumes, and the subagent
+  shape is again the parent's `<session>.jsonl` plus `agent_id`. So D10's
+  payload fallback would recover the right key. That fallback is a code
+  change, and it is still unbuilt.
+- **`.claude.json` is `$CLAUDE_CONFIG_DIR/.claude.json`, scrub or not.** Both
+  runs changed only the mtime of `~/.claude-work/.claude.json`.
+  `~/.claude.json` kept an mtime from before the first run, even though a
+  live default session shared the machine. The size stayed the same both
+  times, and `backups/` stayed empty through the first run. This dir already had a
+  `.claude.json`, so there was no missing-file warning like the one on Windows.
+- **`claude --config-dir` was not checked.** `claude --help` does not list
+  it in 2.1.314.
 
 Verified above, so no longer assumptions:
 
 - `.claude.json` lives at `$CLAUDE_CONFIG_DIR/.claude.json` when the variable
   is set, and at `~/.claude.json` otherwise.
+- the hook inherits a non-default `CLAUDE_CONFIG_DIR` unchanged, as long as
+  the scrub is off.
 
 Refuted above:
 
@@ -577,6 +610,9 @@ Refuted above:
   it.
 - *`CLAUDE_CONFIG_DIR=~/.claude` is the default login (D2)*: the
   credentials are the same, but `.claude.json` is a different file.
+- *the hook inherits `CLAUDE_CONFIG_DIR` unchanged*: not under
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, which removes it from every hook and
+  tool subprocess. D10's fallback is needed for that case (plan, X3).
 
 ---
 

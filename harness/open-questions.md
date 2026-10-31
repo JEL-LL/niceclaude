@@ -316,35 +316,37 @@ transcript.
 
 ---
 
-## 10. TODO: Phase 0 Procedure B for issue #1 (needs a machine with two logins)
+## 10. D10 is needed: the subprocess env scrub hides the config dir from hooks — OPEN
 
-Filed 2026-10-02. The work machine has one Claude account, so this cannot run
-there. Do it from a checkout on a machine with two accounts (the user's home
-machine), then commit the results.
+Filed 2026-10-02 as a TODO to run Phase 0 Procedure B of
+`per-account-state-plan.md` on a machine with two logins. Ran 2026-10-30 on
+Claude Code 2.1.314, Linux, against a second login (`platform-findings.md`
+§15; plan review log, X3).
 
-**What to run:** Procedure B in `per-account-state-plan.md`, §8, *Phase 0*.
-Use Procedure A's probe hook (`--settings <scratch>/probe.json`, logging
-`CLAUDE_CONFIG_DIR`, `hook_event_name`, `agent_id` and `transcript_path`,
-nothing else) against the second account's config dir:
+**What it found:**
 
-1. `CLAUDE_CONFIG_DIR=<dir>`: does the hook see the value? Where is
-   `.claude.json` written?
-2. `CLAUDE_CONFIG_DIR=<dir>` plus `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`: does
-   the hook still see it?
-3. `claude --config-dir <dir>`, but only if `claude --help` lists the flag.
+1. `CLAUDE_CONFIG_DIR=<dir>`: the hook sees the value verbatim, in the parent
+   and in the subagent. `.claude.json` is written at `<dir>/.claude.json`, and
+   `~/.claude.json` is untouched.
+2. `CLAUDE_CONFIG_DIR=<dir>` plus `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`: the
+   hook does **not** see it, in any event. The session still runs on the
+   second login, and `transcript_path` still lies under `<dir>/projects`.
+3. `claude --config-dir`: not run. `claude --help` does not list the flag in
+   2.1.314.
 
-Never copy credential files, and never print them.
+**What it means:** under the scrub, a second account's hooks are keyed as the
+default account. They pace against its snapshot and log to its `hook.log`.
+The plan's D10 payload fallback, which derives the config dir from
+`transcript_path`, would recover the right key in every event observed. The
+usual setups, the shell aliases and `install`, do not set the scrub, so they
+are unaffected.
 
-**Where the answer goes:** `platform-findings.md` §15, and a review-log entry
-in the plan, like X1–X2.
+**What to do:** decide whether to build D10. It is a code change: the payload
+fallback, `CONFIG_DIR_OVERRIDE` and the tests, as D10 and the plan's Phase 2 notes describe.
+Then drop the `ASSUMPTION (Phase 0, unverified)` comment at
+`_shared.ACCOUNT_KEY`. Until then, the scrub case is a known gap.
 
-**What depends on it:** the code assumes the hook inherits
-`CLAUDE_CONFIG_DIR` unchanged (the `ASSUMPTION (Phase 0, unverified)` comments
-in `_shared.py`). If check 2 or 3 shows the variable lost, build the plan's
-D10 payload fallback, which derives the config dir from `transcript_path`.
-Until then, a hook that has lost the variable is keyed as the default account.
-
-Also worth checking on a Mac with two accounts: `config_key` assumes that a
+Still worth checking on a Mac with two accounts: `config_key` assumes that a
 config dir resolving to `~/.claude` (through a symlink, say) is the default
 login. On macOS the keychain entry may be keyed on the directory's spelling, so
 it could be the same dir but not the same login.

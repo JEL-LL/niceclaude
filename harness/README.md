@@ -83,9 +83,9 @@ Accounts sharing one `NICECLAUDE_DIR` are told apart by the `config_key`
 stamp on every snapshot and log record, which the hook and `load_log` check.
 
 The account is read from the environment. A hook that loses
-`CLAUDE_CONFIG_DIR` is keyed as the default account; whether that can happen
-is unverified until Procedure B (`open-questions.md` §10) is run, and the
-payload fallback that would cover it is deferred until then. Design: decision
+`CLAUDE_CONFIG_DIR` is keyed as the default account. Procedure B found that
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` does exactly that, and the payload
+fallback that would cover it is not built yet (`open-questions.md` §10). Design: decision
 19, and `per-account-state-plan.md`.
 
 ## Machine state left behind by development
