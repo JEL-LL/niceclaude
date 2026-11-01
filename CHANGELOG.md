@@ -34,6 +34,21 @@ signs of a daemon that was missed.
 
 ### Changed
 
+- **The hook timeout is now 8 days (`691200`), up from 48h, because 48h
+  leaked too.** It leaked the same way the old 6h ceiling did, just more
+  rarely. A weekly bucket far over its line (92% against a 72.8% line) solves
+  to a hold longer than two days. `hook.log` showed three holds killed at
+  47.95–48.00h to the second. Each was followed by a fresh brake, and each
+  let one tool call through unpaced and unlogged. A hold is bounded by its
+  window's reset, so 8 days (one weekly window plus a day of slack) is out of
+  reach of any real hold. `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` follows it
+  to `691800000`. A test keeps that below Node's 2³¹−1 ms `setTimeout`
+  limit, because past that limit Node fires after 1ms.
+
+  **Re-run `niceclaude install` in every account**, then restart running
+  sessions, which keep the hook config they started with. `install`
+  reconciles both the timeout and its own previously written stall value.
+
 - **`plot` writes its figure beside this account's state by default**, instead
   of into the folder the command ran in. That folder is normally a repository
   someone is working in, and a `niceclaude-usage.png` appearing there mid-task

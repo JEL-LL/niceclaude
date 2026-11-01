@@ -283,7 +283,7 @@ DEFAULT_MAX_DELAY = None
 # 0 disables it, which is the previous behaviour exactly. The default is 7,
 # which is wide enough that one hold buys a meaningful run: on the weekly line
 # it is about 13h of headroom bought by a hold of the same order, against 1.68h
-# bought by a hold of 1.68h with no band. It is well inside the 48h hook
+# bought by a hold of 1.68h with no band. It is well inside the 8-day hook
 # timeout, and it costs nothing from the ceiling -- the brake line is where it
 # always was.
 DEFAULT_BAND = 7
@@ -309,7 +309,7 @@ DEFAULT_BAND_DELAY = 180
 # This is a deliberate exception to "never proceed on data we do not have",
 # and the user's rule is what makes it one: never stall forever, fail free
 # rather than freeze. Without it a blind hold had no ceiling but HOOK_TIMEOUT,
-# i.e. two days, on an outage the hook could do nothing about.
+# then two days, on an outage the hook could do nothing about.
 #
 # 240 rather than anything longer because the cost being bounded is the
 # prompt cache, not the wait. A hold that outlives the 5-minute TTL makes the
@@ -334,13 +334,24 @@ DEFAULT_BLIND_DELAY = 240
 # converting that into `max_delay: 21600`.
 #
 # A hold is bounded by its window's own reset (bucket_pace clamps the wake), so
-# the longest legitimate hold is one window: 7 days for the weekly buckets. 48h
-# covers every hold seen in practice with room to spare -- the deepest overage
-# in that log solved to ~15h -- without committing to a freeze measured in days.
+# the longest legitimate hold is one window: 7 days for the weekly buckets.
+#
+# It was then 172800 (48h), on the theory that that covered every hold seen in
+# practice. It did not, for long: a weekly bucket far over its line (92% against
+# a 72.8% line) solves to more than two days, and hook.log showed three holds
+# killed at 47.95-48.00h to the second, each followed by an unpaced step and a
+# fresh brake. Same leak, rarer.
+#
+# So the ceiling is now out of reach: one full weekly window plus a day of
+# slack, for RESET_JITTER and for the stale-snapshot waits around a reset. Any
+# hold that reaches it is a bug, not a pace. It must also stay under 2**31 - 1
+# milliseconds once STALL_TIMEOUT_MS adds its 10 minutes -- Node clamps a
+# longer setTimeout to 1ms, which would turn the longest ceiling into the
+# shortest. Eight days is ~0.69e9ms against ~2.15e9; tests pin both bounds.
 #
 # Do NOT simply drop the field to remove the ceiling: omitted, it defaults to
 # 60s, which would cap every hold at one minute.
-HOOK_TIMEOUT = 172800
+HOOK_TIMEOUT = 691200
 
 MAX_STALE = 180      # a snapshot older than this is not trusted
 
@@ -681,7 +692,7 @@ def bucket_pace(bucket, now, m0, m1, band=0):
         # 18.05h away that `decide` read as REAL. That made the hold
         # CONFIDENT rather than blind, and blind_delay cannot release a
         # confident hold while max_delay is off by default, so the only
-        # ceiling left was the 48h hook timeout: a stall measured in days,
+        # ceiling left was the hook timeout (then 48h): a stall measured in days,
         # against a user rule that says fail free rather than stall forever.
         # Returning `wake: None` here is what hands it to THE BLIND RULE
         # instead, which bounds it at blind_delay.

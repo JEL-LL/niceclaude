@@ -133,7 +133,7 @@ twice. `niceclaude uninstall` removes exactly what it added and leaves policy an
 logs alone.
 
 `install` also sets `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` in that file's `env`
-block, to the 48h hook timeout plus 10 minutes. Claude Code kills a background
+block, to the 8-day hook timeout plus 10 minutes. Claude Code kills a background
 subagent that makes no progress for 10 minutes by default, and a hold is not
 progress, so without this a subagent held longer is reported `Agent stalled`
 and lost rather than paced. A value you have set yourself is left alone, with a
@@ -345,8 +345,8 @@ Some holds have no data behind them. The snapshot has no usable bucket; or it is
 too old to trust and the refresh is failing, and it does not show you over the
 line; or every bucket over the line has no reset time to solve against. The hook
 calls that hold *blind*, and it used to last until a usable reading appeared —
-or, through a long `/usage` outage, until the harness killed the hook two days
-later.
+or, through a long `/usage` outage, until the harness killed the hook at its
+timeout, then two days later.
 
 Now a blind hold ends after `blind_delay` seconds, default 240, and the call
 goes through. The next tool call refreshes and looks again, and if it is still
@@ -568,7 +568,7 @@ not resolve into "I am comfortably under the line". Only `--blind-delay` and
 
 ### Sizing a band, and the ceiling that limits it
 
-`install` registers the hook with `timeout: 172800` — 48 hours, and that is the
+`install` registers the hook with `timeout: 691200` — 8 days, and that is the
 real limit on any hold. Past it the harness kills the hook, and a killed hook
 does not brake: the agent proceeds *unpaced*, silently, because the killed
 process never gets to log its release. An unmatched `brake` in `hook.log` is the
@@ -582,9 +582,13 @@ it takes" and the timeout was silently rewriting it to "hold six hours, then go
 anyway".
 
 A hold is bounded by its window's own reset, so the longest one that can ever be
-demanded is a single window — seven days for the weekly buckets. 48h covers
-everything seen in practice with room to spare. If you want the ceiling provably
-unreachable rather than merely generous, 604800 is the number.
+demanded is a single window — seven days for the weekly buckets. The next value,
+48h, leaked too, just more rarely: a weekly bucket far over its line solves to
+more than two days, and the log showed holds killed at 48.00h to the second.
+Eight days is one full window plus a day of slack, so a hold that reaches it is
+a bug, not a pace. It cannot go much higher: the stall timeout `install` derives
+from it must stay under Node's 2³¹−1 ms `setTimeout` limit, past which Node fires
+after 1ms instead.
 
 Do not remove the field to lift the limit: omitted, it reverts to the hook
 default of ten minutes, which is far worse than the ceiling you were trying to

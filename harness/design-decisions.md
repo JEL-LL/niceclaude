@@ -181,10 +181,13 @@ proceeds *unpaced*, silently, since a killed process never logs its release.
 
 It was 21600 (6h), and that leaked measurably: see `platform-findings.md` §8 for
 the 198 unmatched brakes, spaced six hours apart to the second, in a folder that
-had explicitly asked for no cap at all. Now 172800 (48h), which clears every
-hold observed in practice. A hold is bounded by its window's own reset, so the
-true worst case is a single window — seven days — and 604800 would put the
-ceiling out of reach entirely.
+had explicitly asked for no cap at all. Then 172800 (48h), which cleared every
+hold observed at the time — until a weekly bucket at 92% against a 72.8% line
+was killed at 48.00h to the second, three times in a month. A hold is bounded by
+its window's own reset, so the true worst case is a single window — seven days.
+Now 691200 (8 days): that window plus a day of slack, which puts the ceiling out
+of reach. The upper bound is Node's: `STALL_TIMEOUT_MS` (below) must stay under
+2³¹−1 ms, or `setTimeout` fires after 1ms.
 
 This still interacts with band sizing, just no longer dangerously: a band costs
 its width in hold time, ~1.94h per point on the weekly line. Keep it small
@@ -851,7 +854,7 @@ loses the agent instead of pacing it.
 `env` block by default. That is unlike `--subagent-cache-*`, which is opt-in
 because it trades money. This one trades nothing but stall detection, and
 without it, pacing subagents does not work. The value is `HOOK_TIMEOUT` plus
-the default 10 minutes (`STALL_TIMEOUT_MS`, 173400000), so even after the
+the default 10 minutes (`STALL_TIMEOUT_MS`, 691800000), so even after the
 longest hold the hook can take, the model keeps its usual allowance to the
 first chunk.
 
@@ -882,8 +885,8 @@ can still override it.
 
 §11 and §12 together made a blind hold uncapped. With `max_delay` off, the
 default, a hold the hook could not justify from data lasted until a usable
-reading appeared or the harness killed the hook at `HOOK_TIMEOUT`, 48 hours
-later. The user overruled the design that produced that:
+reading appeared or the harness killed the hook at `HOOK_TIMEOUT`, then 48
+hours later. The user overruled the design that produced that:
 
 > There should never be a stall forever situation. I would rather fail free
 > than stall for forever.

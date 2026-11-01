@@ -3,7 +3,7 @@
 A blind hold is one no data justifies: nothing usable in the snapshot, a stale
 snapshot under the line with the refresh failing, or every hot bucket
 wake-less (unusable, or over the m0 floor with no reset clause). Before this
-it had no ceiling but the harness's 48h timeout, and the rule it now answers
+it had no ceiling but the harness's multi-day timeout, and the rule it now answers
 to is the user's: never stall forever, fail free rather than freeze. Past
 `blind_delay` (default 240s, under the 5-minute prompt cache) the call goes
 through as `blind-release`, and the next one looks again.

@@ -546,7 +546,7 @@ def test_a_window_that_has_not_begun_yet_is_judged_against_the_floor(cwd,
     with pct 50 the lines ran negative -- elapsed -3.0, a brake line at -256%
     that nothing can ever be under. And the solve returned a wake 18.05h away
     which `decide` read as REAL, so the hold was CONFIDENT: blind_delay cannot
-    release one of those and max_delay is off by default, leaving the 48h hook
+    release one of those and max_delay is off by default, leaving the multi-day hook
     timeout as the only ceiling. That is the stall-forever class the user rule
     forbids outright.
 
@@ -651,7 +651,7 @@ def test_non_numeric_state_fields_return_rather_than_raise(field, value):
 
 def test_the_pre_start_hold_is_released_by_blind_delay(held, cwd):
     """The end of the same story, on the virtual clock: the hold that used to
-    run to the 48h hook timeout now ends at blind_delay."""
+    run to the multi-day hook timeout now ends at blind_delay."""
     b = session_bucket(50, resets=RESETS + 20 * 3600)
     reason, _refreshes, clock = held(
         {"session": b}, RESETS,

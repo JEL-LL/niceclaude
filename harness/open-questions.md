@@ -190,8 +190,10 @@ and band.
 - 2,572 releases leave about 32 holds (1.2%) with no `release`. The log
   cannot say whether the harness killed them at the hook timeout, the
   session was closed while frozen, or they are still running. The user has
-  accepted this rather than chase it (2026-10-09): the hook's timeout is 48
-  hours, and an agent let go after a 48-hour hold does little harm.
+  accepted this rather than chase it (2026-10-09): the hook's timeout was 48
+  hours, and an agent let go after a 48-hour hold does little harm. Revisited
+  2026-11-01: three of them were 48h kills of weekly holds, so the timeout is
+  now 8 days (`_shared.HOOK_TIMEOUT`), out of reach of any real hold.
 - First token of each `brake` reason, i.e. the first hot bucket: `session`
   335, `week:Fable` 127, `week:all models` 3, and 5 others (blind or no
   buckets). In this use the 5-hour line did most of the braking. See §3.

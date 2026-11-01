@@ -1350,7 +1350,7 @@ def read_ttl_marker(target):
 # The value is the longest hold the hook can take (HOOK_TIMEOUT) plus the
 # default allowance, so even after that hold the model still gets the usual 10
 # minutes to its first chunk. The price: a subagent genuinely stalled on the
-# API is noticed after ~48h instead of 10 minutes.
+# API is noticed after ~8 days instead of 10 minutes.
 
 STALL_ENV_KEY = "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"
 STALL_DEFAULT_MS = 600000

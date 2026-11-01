@@ -237,7 +237,8 @@ unmatched brakes, the recent ones spaced 6.00–6.01h apart to the second, all
 `week:Fable`, with the percentage climbing 41 → 67 straight through them — in a
 folder configured `max_delay: null`, which is an explicit "never proceed while
 over the line". The registered timeout was quietly converting that into
-`max_delay: 21600`. Raised to 172800 (48h); see `_shared.HOOK_TIMEOUT`.
+`max_delay: 21600`. Raised to 172800 (48h), which leaked the same way more
+rarely, then to 691200 (8 days); see `_shared.HOOK_TIMEOUT`.
 
 Because `PreToolUse` fires between API turns, nothing is in flight during the
 sleep — the freeze parks between connections rather than stalling one

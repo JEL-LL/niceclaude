@@ -307,10 +307,24 @@ def test_the_timeout_is_long_enough_to_outlast_a_real_hold(settings):
     A hold is bounded by its window's own reset, and the binding window here is
     the seven-day weekly one. Six hours -- the value this shipped with -- is far
     short of a hold that window can legitimately demand, which is exactly how
-    the leak arose. Anything at least a day clears every hold observed in
-    practice; the deepest overage in the log that exposed this solved to ~15h.
+    the leak arose. 48h, the next value, leaked too: three holds killed at
+    48.00h to the second, a weekly bucket far over its line. So the floor is the
+    window itself -- a hold that legitimately reaches it cannot exist.
     """
-    assert HOOK_TIMEOUT >= 86400
+    assert HOOK_TIMEOUT >= 604800
+
+
+def test_the_stall_timeout_stays_inside_node_settimeout():
+    """The ceiling cannot be raised without bound.
+
+    Claude Code runs on Node, and Node clamps a setTimeout delay above
+    2**31 - 1 ms to 1ms. A stall timeout past that would kill every subagent at
+    once rather than never -- the longest setting becoming the shortest. The
+    hook timeout itself, in ms, must clear the same bound.
+    """
+    limit = 2**31 - 1
+    assert int(cli.STALL_TIMEOUT_MS) < limit
+    assert HOOK_TIMEOUT * 1000 < limit
 
 
 def test_raising_the_timeout_reaches_an_existing_registration(settings,

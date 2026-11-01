@@ -1090,7 +1090,7 @@ def test_the_wake_is_the_latest_OVER_bucket_and_a_band_bucket_does_not_extend_it
     pushed past the hook's registered timeout gets the hook KILLED -- after
     which the agent proceeds unpaced, silently. So the bug would spend the
     guarantee to buy nothing. (That ceiling is HOOK_TIMEOUT, since raised to
-    48h; the point stands, it just takes more pooling to reach.)
+    8 days; the point stands, it just takes more pooling to reach.)
     """
     week = bucket_pace(week_bucket(38), HALFWAY, M0, M1, BAND)
     session = bucket_pace(session_bucket(HOT_PCT), HALFWAY, M0, M1, BAND)
